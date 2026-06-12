@@ -16,24 +16,22 @@ The Saturn Mesh aims to deliver:
 
 This package is the concrete MLX implementation of the execution side of that vision.
 
-## Current Scope (v0.1 — strictly minimal & verifiable — skeleton hardening phase)
+## Current Scope (v0.1 — strictly minimal & verifiable)
 
 - Single Apple Silicon node only. No real cross-node mesh, no layer sharding.
 - `MeshSession` + `MeshModel` are true actors. Public API surface matches the design (including speculativeGamma and drafterId).
 - Placement policy is wired at load time and decisions recorded in telemetry.
-- Model loading (`loadModel`) is stubbed — it throws a clear error explaining the required Hub downloader + tokenizer wiring. No real LLMModelFactory / MLX container is acquired yet.
-- Generation uses the high-level MLXLMCommon.generate path. Comments and some newCache calls exist for future KV cache reuse, but actual cross-turn reuse via TokenIterator is not yet active (TODO).
-- Speculative path (speculativeGamma) is wired in the API and telemetry. When no drafter is attached (or in current skeleton), it safely falls back to normal generation. Full drafter proposal + verifier acceptance/rejection with proper math + draftCache rollback is still TODO (see _runSpeculative).
-- Telemetry is truthful: speculativeGamma/acceptedTokens are only set when a drafter was attached *and* the speculative branch was taken. generatedTokens currently reflects generator-emitted chunks (not raw token IDs).
+- Model loading (`loadModel`) is wired through `LLMModelFactory` with the Hub downloader and Hugging Face tokenizer loader macros. Real inference still requires Apple Silicon plus local/network access to model weights.
+- Generation uses `TokenIterator` with a persistent cache box for the main model path.
+- Speculative path (speculativeGamma) is wired in the API and telemetry. When a drafter is attached, the branch runs the loaded drafter model for proposal tokens. Full verifier acceptance/rejection with proper math and cache rollback is still TODO.
+- Telemetry is truthful: speculativeGamma/acceptedTokens are only set when a drafter was attached *and* the speculative branch was taken.
 - Stream completion is now correct (continuation.finish() called on success paths).
 - Basic error handling (.notLoaded) and focused unit tests for stream/ failure / telemetry truthfulness.
 - Comments reference the placement cost model and speculative speedup formula.
 
-**Explicit non-goals / current limitations (skeleton phase):**
-- No real model loading / tokenizer / downloader (see recommended milestone order).
+**Explicit non-goals / current limitations:**
 - No cross-device layer sharding or production multi-node.
-- No full speculative decoding acceleration (falls back).
-- No KV cache reuse across generations yet.
+- No full speculative decoding acceleration yet; the drafter path emits proposal tokens but does not yet verify/accept/reject with the main model.
 - Real hardware smoke tests are manual only.
 
 ## Exact Public API (must remain stable)
@@ -74,7 +72,9 @@ saturn-mlx-mesh/
 
 ## Dependencies
 
-- `mlx-swift-lm` (provides `MLXLLM` + `MLXLMCommon`)
+- `mlx-swift-lm` (provides `MLXLLM`, `MLXLMCommon`, and `MLXHuggingFace`)
+- `swift-huggingface` (macro support for Hub downloader wiring)
+- `swift-transformers` / `Tokenizers` (macro support for Hugging Face tokenizer loading)
 - Targets macOS 15+ / iOS 18+
 
 ## Validation performed
@@ -84,20 +84,17 @@ swift build
 swift test
 ```
 
-(Now includes tests for .notLoaded, stream completion on success, and truthful absence of speculative telemetry when no drafter is attached.)
+(Includes tests for .notLoaded, stream completion on success, truthful absence of speculative telemetry when no drafter is attached, graph cost modeling, and lightweight session wiring.)
 
-The loader remains intentionally stubbed per the hardening milestone plan. Real loading is the next major step.
+Real model execution is covered by the opt-in `SaturnMLXMeshSmoke` executable rather than normal unit tests, so CI does not download large weights.
 
 ## Recommended next steps (per current analysis)
 
-Follow the skeleton-hardening then real-inference order:
-
-1. (Done in this pass) Stream completion, truthful telemetry, honest docs, focused generate tests.
-2. Implement real model loading (LLMModelFactory + proper Hub downloader / #huggingFaceTokenizerLoader() + Tokenizers product). This is the next substantial milestone.
-3. Only after real loading works: tackle KV cache reuse (TokenIterator + persistent cache across turns) and real drafter/verifier speculative decoding.
-4. Add real-hardware smoke / benchmark target.
-5. Wire telemetry back to control plane, evolve placement, etc.
-6. Multi-node later.
+1. Implement full verifier/drafter speculative acceptance: propose gamma tokens from the drafter, verify with the main model, accept/reject with correct sampling, and roll back caches when needed.
+2. Expand real-hardware smoke and benchmark coverage for load, generation, KV reuse, drafter path, and telemetry.
+3. Wire telemetry back to the control plane and evolve placement using live costs.
+4. Add runtime DAG scheduling over the weighted Saturn Mesh graph.
+5. Multi-node / remote control-plane execution later.
 
 The package is intentionally separate from saturn-control.
 

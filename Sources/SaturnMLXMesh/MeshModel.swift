@@ -89,10 +89,10 @@ public actor MeshModel {
         if simulateSuccessForTest {
             return AsyncThrowingStream { continuation in
                 Task {
-                    for i in 0..<4 {
+                    let generated = max(0, min(maxTokens, 4))
+                    for i in 0..<generated {
                         continuation.yield(GeneratedToken(text: "tok\(i)", tokenID: i))
                     }
-                    continuation.finish()
 
                     // Record truthful telemetry (no drafter in sim unless attached; here we force non-spec)
                     let dur = 0.05
@@ -100,15 +100,16 @@ public actor MeshModel {
                         modelID: id,
                         role: role,
                         promptTokens: 3,
-                        generatedTokens: 4,
+                        generatedTokens: generated,
                         duration: dur,
-                        tokensPerSecond: 80.0,
+                        tokensPerSecond: Double(generated) / dur,
                         speculativeGamma: nil,
                         acceptedTokens: nil,
                         memoryPressureHint: nil,
                         timestamp: Date()
                     )
                     await telemetry.recordGenerationInfo(info)
+                    continuation.finish()
                 }
             }
         }
@@ -192,7 +193,7 @@ public actor MeshModel {
                         modelID: id,
                         role: role,
                         promptTokens: 0,
-                        generatedTokens: count,   // NOTE: counts generator chunks (text pieces), not necessarily raw token IDs yet
+                        generatedTokens: count,
                         duration: dur,
                         tokensPerSecond: tps,
                         speculativeGamma: didSpec ? gamma : nil,
