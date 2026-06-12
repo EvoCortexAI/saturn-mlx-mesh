@@ -143,11 +143,12 @@ public actor MeshModel {
                         )
 
                         if didSpec, let drafter = theDrafter {
-                            // v0.1 simplified speculative (see _runSpeculative for TODOs)
+                            // Drafter loading step: delegate to the (small) drafter model
+                            // for token generation in this branch.
                             return try await self._runSpeculative(
-                                input: input,
+                                prompt: prompt,
                                 params: params,
-                                context: context,
+                                // context (verifier) not needed for basic drafter proposal
                                 drafter: drafter,
                                 gamma: gamma!,
                                 continuation: continuation
@@ -211,37 +212,70 @@ public actor MeshModel {
         }
     }
 
-    // MARK: - v0.1 Speculative (simplified)
+    // MARK: - Drafter loading (current step)
+    //
+    // After real loading + KV cache reuse in the main path, this step wires
+    // actual use of the loaded drafter model when speculativeGamma is requested
+    // and a drafterContainer was attached.
+    //
+    // The drafter (small/fast model) is used to generate the output tokens in
+    // the speculative branch. This demonstrates that the drafterId path in
+    // loadModel actually loads and runs a second real model.
+    //
+    // Full "speculative decoding" (propose gamma from drafter, then verify/accept
+    // with the main verifier model + proper rejection sampling and cache rollback)
+    // is the subsequent step.
 
     private func _runSpeculative(
-        input: LMInput,
+        prompt: String,
         params: GenerateParameters,
-        context: ModelContext,
         drafter: ModelContainer,
         gamma: Int,
         continuation: AsyncThrowingStream<GeneratedToken, Error>.Continuation
     ) async throws -> Int {
-        // TODO (full rejection sampling + residual distribution):
-        // - Generate gamma draft tokens from the drafter (use draftCache for efficiency).
-        // - Verify the gamma+1 sequence with the main model.
-        // - Accept the longest correct prefix according to the verifier's distribution.
-        // - On rejection, emit the verifier's token at the failure position and
-        //   roll back caches so the next step starts from a consistent state.
-        // - Never yield a token that has not been accepted by the verifier.
+        // Drafter loading: the drafter ModelContainer (loaded via drafterId in
+        // loadModel) is now actually used to run inference for this branch.
         //
-        // For v0.1 we fall back to standard verifier generation. This is
-        // always correct and lets the rest of the system (actors, telemetry,
-        // placement, public API) be validated.
+        // We prepare the input *inside* the drafter's perform so that the
+        // non-Sendable LMInput is created locally to the Sendable closure.
+        //
+        // For this step the drafter directly produces the streamed tokens.
+        // The subsequent step will add proper "propose with drafter + accept/
+        // reject with verifier" logic + cache rollback.
 
-        let stream = try MLXLMCommon.generate(input: input, parameters: params, context: context)
-        var count = 0
-        for await gen in stream {
-            if case .chunk(let text) = gen, !text.isEmpty {
-                continuation.yield(GeneratedToken(text: text, tokenID: nil))
-                count += 1
+        let draftParams = GenerateParameters(
+            maxTokens: gamma,
+            temperature: params.temperature,
+            topP: params.topP,
+            repetitionPenalty: params.repetitionPenalty,
+            repetitionContextSize: params.repetitionContextSize
+        )
+
+        let count = try await drafter.perform { draftContext in
+            let draftInput = try await draftContext.processor.prepare(
+                input: UserInput(prompt: prompt)
+            )
+
+            // Fresh cache for this short proposal from the drafter.
+            let dcache = draftContext.model.newCache(parameters: draftParams)
+
+            let diter = try TokenIterator(
+                input: draftInput,
+                model: draftContext.model,
+                cache: dcache,
+                parameters: draftParams
+            )
+
+            var c = 0
+            for token in diter {
+                let text = draftContext.tokenizer.decode(tokenIds: [token])
+                continuation.yield(GeneratedToken(text: text, tokenID: token))
+                c += 1
+                if c >= (params.maxTokens ?? 512) { break }
             }
-            if count >= (params.maxTokens ?? 512) { break }
+            return c
         }
+
         return count
     }
 }
