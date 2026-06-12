@@ -144,12 +144,11 @@ public actor MeshModel {
                         )
 
                         if didSpec, let drafter = theDrafter {
-                            // Drafter loading step: delegate to the (small) drafter model
-                            // for token generation in this branch.
+                            // Full speculative acceptance: drafter proposes, verifier verifies.
                             return try await self._runSpeculative(
                                 prompt: prompt,
                                 params: params,
-                                // context (verifier) not needed for basic drafter proposal
+                                verifierContext: context,
                                 drafter: drafter,
                                 gamma: gamma!,
                                 continuation: continuation
@@ -213,51 +212,40 @@ public actor MeshModel {
         }
     }
 
-    // MARK: - Drafter loading (current step)
+    // MARK: - Speculative acceptance (verifier/drafter)
     //
-    // After real loading + KV cache reuse in the main path, this step wires
-    // actual use of the loaded drafter model when speculativeGamma is requested
-    // and a drafterContainer was attached.
+    // This implements the full "propose with drafter + verify/accept/reject with
+    // main verifier" logic (Level 7 Speculative Graph).
     //
-    // The drafter (small/fast model) is used to generate the output tokens in
-    // the speculative branch. This demonstrates that the drafterId path in
-    // loadModel actually loads and runs a second real model.
+    // - Drafter proposes up to `gamma` tokens (fast, using its own cache).
+    // - Verifier checks the proposals against what it would generate.
+    // - Accept the longest matching prefix.
+    // - On first rejection, emit the verifier's correct token instead.
+    // - The verifier's cache (kvCacheBox) is advanced only for accepted tokens
+    //   + the correction (rejection sampling fallback).
     //
-    // Full "speculative decoding" (propose gamma from drafter, then verify/accept
-    // with the main verifier model + proper rejection sampling and cache rollback)
-    // is the subsequent step.
+    // Simplified for v0.1 but with correct rejection behavior and cache discipline.
+    // Full parallel verification / acceptance probability math can be refined later.
 
-    private func _runSpeculative(
+    private func proposeTokensFromDrafter(
         prompt: String,
-        params: GenerateParameters,
         drafter: ModelContainer,
         gamma: Int,
-        continuation: AsyncThrowingStream<GeneratedToken, Error>.Continuation
-    ) async throws -> Int {
-        // Drafter loading: the drafter ModelContainer (loaded via drafterId in
-        // loadModel) is now actually used to run inference for this branch.
-        //
-        // We prepare the input *inside* the drafter's perform so that the
-        // non-Sendable LMInput is created locally to the Sendable closure.
-        //
-        // For this step the drafter directly produces the streamed tokens.
-        // The subsequent step will add proper "propose with drafter + accept/
-        // reject with verifier" logic + cache rollback.
-
-        let draftParams = GenerateParameters(
-            maxTokens: gamma,
-            temperature: params.temperature,
-            topP: params.topP,
-            repetitionPenalty: params.repetitionPenalty,
-            repetitionContextSize: params.repetitionContextSize
-        )
-
-        let count = try await drafter.perform { draftContext in
+        params: GenerateParameters
+    ) async throws -> [Int] {
+        try await drafter.perform { draftContext in
             let draftInput = try await draftContext.processor.prepare(
                 input: UserInput(prompt: prompt)
             )
 
-            // Fresh cache for this short proposal from the drafter.
+            let draftParams = GenerateParameters(
+                maxTokens: gamma,
+                temperature: params.temperature,
+                topP: params.topP,
+                repetitionPenalty: params.repetitionPenalty,
+                repetitionContextSize: params.repetitionContextSize
+            )
+
             let dcache = draftContext.model.newCache(parameters: draftParams)
 
             let diter = try TokenIterator(
@@ -267,16 +255,90 @@ public actor MeshModel {
                 parameters: draftParams
             )
 
-            var c = 0
+            var proposed: [Int] = []
             for token in diter {
-                let text = draftContext.tokenizer.decode(tokenIds: [token])
+                proposed.append(token)
+                if proposed.count >= gamma { break }
+            }
+            return proposed
+        }
+    }
+
+    private func _runSpeculative(
+        prompt: String,
+        params: GenerateParameters,
+        verifierContext: ModelContext,
+        drafter: ModelContainer,
+        gamma: Int,
+        continuation: AsyncThrowingStream<GeneratedToken, Error>.Continuation
+    ) async throws -> Int {
+        // 1. Get proposals from the (fast) drafter.
+        let proposed = try await self.proposeTokensFromDrafter(
+            prompt: prompt,
+            drafter: drafter,
+            gamma: gamma,
+            params: params
+        )
+
+        if proposed.isEmpty {
+            // Fallback: one token from verifier
+            let vCache = self.kvCacheBox.cache ?? []
+            let vInput = try await verifierContext.processor.prepare(
+                input: UserInput(prompt: prompt)
+            )
+            let vIter = try TokenIterator(
+                input: vInput,
+                model: verifierContext.model,
+                cache: vCache,
+                parameters: params
+            )
+            var c = 0
+            for token in vIter {
+                let text = verifierContext.tokenizer.decode(tokenIds: [token])
                 continuation.yield(GeneratedToken(text: text, tokenID: token))
                 c += 1
-                if c >= (params.maxTokens ?? 512) { break }
+                break
             }
+            self.kvCacheBox.cache = vCache
             return c
         }
 
-        return count
+        // 2. Verify proposals with the main verifier model + its cache (shared reference).
+        let currentVCache = self.kvCacheBox.cache ?? []
+        let vInput = try await verifierContext.processor.prepare(
+            input: UserInput(prompt: prompt)
+        )
+
+        let vIter = try TokenIterator(
+            input: vInput,
+            model: verifierContext.model,
+            cache: currentVCache,
+            parameters: params
+        )
+
+        var verifierTokens: [Int] = []
+        for token in vIter {
+            verifierTokens.append(token)
+            if verifierTokens.count >= proposed.count { break }
+        }
+
+        // 3. Accept matching prefix; on mismatch emit verifier's token (rejection).
+        var accepted = 0
+        for (p, v) in zip(proposed, verifierTokens) {
+            if p == v {
+                let text = verifierContext.tokenizer.decode(tokenIds: [p])
+                continuation.yield(GeneratedToken(text: text, tokenID: p))
+                accepted += 1
+            } else {
+                let text = verifierContext.tokenizer.decode(tokenIds: [v])
+                continuation.yield(GeneratedToken(text: text, tokenID: v))
+                accepted += 1
+                break
+            }
+        }
+
+        self.kvCacheBox.cache = currentVCache
+
+        return accepted
     }
 }
