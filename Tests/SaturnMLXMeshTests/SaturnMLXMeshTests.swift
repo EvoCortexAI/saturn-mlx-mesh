@@ -308,4 +308,57 @@ final class SaturnMLXMeshTests: XCTestCase {
         let g = await mesh.currentComputationGraph()
         XCTAssertEqual(g.episodeResidencies[kv.episodeID], "local:gpu")
     }
+
+    // MARK: - Phase 3 start: PlacementEngine / graph scheduler stub
+
+    func testPlacementEngineGraphAwareAndRewrite() async {
+        let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
+
+        // Populate some graph state (residencies + components) via existing helpers
+        await mesh._registerModelForGraphTest(id: "model-a", role: .primary, unit: .gpu)
+        let ep = ConversationEpisode(id: UUID(), turns: [.init(role: "user", content: "test residency")], embedding: [])
+        let kv = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep)
+        // Add second residency so rewrite mem pressure logic triggers (>1)
+        let ep2 = ConversationEpisode(id: UUID(), turns: [.init(role: "user", content: "second for residency count")], embedding: [])
+        _ = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep2)
+        // now graph has residency count >1
+
+        // Engine decide should still pick expected units but enrich notes with graph data
+        let engine = await mesh.placementEngine
+        let primaryDec = engine.decide(role: .primary, graph: await mesh.currentComputationGraph())
+        XCTAssertEqual(primaryDec.unit, .gpu)
+        XCTAssertTrue(primaryDec.notes?.contains("graph-aware") ?? false)
+        XCTAssertTrue(primaryDec.notes?.contains("residencies") ?? false)
+
+        // Drafter should still be unified (graph enrichment only)
+        let drafterDec = engine.decide(role: .drafter, graph: await mesh.currentComputationGraph())
+        XCTAssertEqual(drafterDec.unit, .unified)
+
+        // Rewrite using a telemetry snapshot with high tps + pressure
+        let snap = TelemetrySnapshot(
+            loads: [],
+            generations: [
+                GenerationInfo(modelID: "model-a", role: .primary, promptTokens: 10, generatedTokens: 200,
+                               duration: 1.0, tokensPerSecond: 200.0, speculativeGamma: nil, acceptedTokens: nil,
+                               memoryPressureHint: 0.6, timestamp: Date())
+            ],
+            totalGeneratedTokens: 200,
+            averageTokensPerSecond: 200.0,
+            lastUpdated: Date()
+        )
+        await mesh.rewriteGraphUsingTelemetry()  // uses internal snapshot, but for test we can call after manual? For this, directly exercise engine
+        var g = await mesh.currentComputationGraph()
+        // Before rewrite, latency ~1.0
+        let before = g.nodeWeights["local:gpu"]?.latency ?? 1.0
+
+        // Call rewrite directly on engine with our snap (simulates what the session method does)
+        var mutableG = await mesh.currentComputationGraph()
+        let engine2 = await mesh.placementEngine
+        engine2.rewrite(graph: &mutableG, using: snap)
+        // After high tps + pressure, latency should drop, memory rise
+        let afterLat = mutableG.nodeWeights["local:gpu"]?.latency ?? 1.0
+        let afterMem = mutableG.nodeWeights["local:gpu"]?.memory ?? 1.0
+        XCTAssertLessThan(afterLat, before, "High tps should have reduced latency weight")
+        XCTAssertGreaterThan(afterMem, 1.0, "Memory pressure + residency should have increased memory weight")
+    }
 }

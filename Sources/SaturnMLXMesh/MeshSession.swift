@@ -55,6 +55,11 @@ public actor MeshSession {
     /// Real [any KVCache] stored via internal boxes; metadata + layer budgets via LayerBudgetAllocator.
     public let kvCacheManager: KVCacheManager
 
+    /// Placement engine / graph scheduler (Phase 3+). Uses the live computationGraph
+    /// (costs + residencies) for decisions and can rewrite weights from telemetry
+    /// (stub toward min ∑w(v) + ∑w(e) including episodic memory).
+    public let placementEngine: PlacementEngine
+
     public init(
         controlPlane: ControlPlane = .local,
         policy: SessionPolicy = .appleSiliconBalanced,
@@ -70,6 +75,7 @@ public actor MeshSession {
         case .appleSiliconBalanced:
             self.policy = PlacementPolicyKind.appleSiliconBalanced
         }
+        self.placementEngine = PlacementEngine(policy: self.policy)
     }
 
     /// Load a model (and optionally a drafter for speculative decoding).
@@ -78,7 +84,7 @@ public actor MeshSession {
         role: ModelRole = .primary,
         drafterId: String? = nil
     ) async throws -> MeshModel {
-        let decision = policy.decide(role: role)
+        let decision = placementEngine.decide(role: role, graph: computationGraph)
         let loadStart = Date()
 
         // Populate the session's first-class MeshComputationGraph (Phase 1).
@@ -244,6 +250,16 @@ public actor MeshSession {
         let comp = max(0.5, 100.0 / tps)         // proxy for relative compute cost
         computationGraph.recordObservedCost(for: siliconKey, latency: lat, compute: comp)
         computationGraph.recordObservedCost(for: modelID, latency: lat, compute: comp)
+    }
+
+    /// Phase 3 scheduler hook: rewrite the live computation graph using current telemetry
+    /// (blends tps/memory pressure into w(v); residency already updated via KV manager).
+    /// This is the entry point for the "continuously rewrites the graph" behavior (L10).
+    public func rewriteGraphUsingTelemetry() async {
+        let snap = await telemetry.snapshot()
+        var g = computationGraph
+        placementEngine.rewrite(graph: &g, using: snap)
+        computationGraph = g
     }
 
     /// Test helper: build an episode KV cache (using LayerBudgetAllocator inside manager)

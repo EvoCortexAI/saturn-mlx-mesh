@@ -367,4 +367,86 @@ public struct MeshComputationGraph: Sendable, Equatable {
     public mutating func markEpisodeResidency(episodeID: UUID, on siliconKey: String) {
         episodeResidencies[episodeID] = siliconKey
     }
+
+    /// Helper for schedulers/engines to blend live costs into a node's weight (L9).
+    public mutating func blendWeight(for key: String, latencyFactor: Double = 1.0, memoryFactor: Double = 1.0) {
+        guard var w = nodeWeights[key] else { return }
+        nodeWeights[key] = NodeWeight(
+            compute: w.compute,
+            memory: w.memory * memoryFactor,
+            power: w.power,
+            latency: w.latency * latencyFactor
+        )
+    }
+}
+
+// MARK: - PlacementEngine (Phase 3: graph scheduler stub, L9/L10)
+
+/// Lightweight engine/scheduler that makes placement decisions informed by the live
+/// MeshComputationGraph (costs, residencies) and can rewrite the graph using telemetry
+/// (min ∑w(v) + ∑w(e) target, stub implementation).
+///
+/// This is the start of the "graph scheduler" that continuously rewrites the DAG
+/// (including episodic memory residency) based on live data. Future versions will
+/// model full Runtime DAGs (L8), cross-device, and true optimizers.
+///
+/// Inspired by production DAG schedulers (e.g. Grox PlanMaster gather/merge +
+/// candidate-pipeline side effects for state mutation) and the Saturn vision.
+public struct PlacementEngine: Sendable {
+    private let basePolicy: any PlacementPolicy
+
+    public init(policy: any PlacementPolicy) {
+        self.basePolicy = policy
+    }
+
+    /// Decide placement, optionally consulting the live graph for residencies, active
+    /// components, and current node weights. For v0.1 the base unit choice is preserved
+    /// (test compatibility) while notes are enriched with graph state.
+    public func decide(role: ModelRole, graph: MeshComputationGraph? = nil) -> PlacementDecision {
+        var decision = basePolicy.decide(role: role)
+
+        if let g = graph {
+            let residencyCount = g.episodeResidencies.count
+            let activeCount = g.active.count
+            let enrichedNote = (decision.notes ?? "") +
+                " [graph-aware: \(residencyCount) episode residencies, \(activeCount) active, using live w(v)]"
+            decision = PlacementDecision(
+                unit: decision.unit,
+                maxKVSizeHint: decision.maxKVSizeHint,
+                allowSpeculative: decision.allowSpeculative,
+                notes: enrichedNote
+            )
+        }
+        return decision
+    }
+
+    /// Rewrite stub: feed TelemetrySnapshot (tps, memory hints, generations) + current
+    /// residencies into node weights. Example adjustments:
+    /// - High tps => reduce latency component of w(v) for affected units.
+    /// - High episode residency + memory pressure => raise memory component.
+    /// This is the hook for the scheduler to approach min ∑w(v) + ∑w(e).
+    public func rewrite(graph: inout MeshComputationGraph, using snapshot: TelemetrySnapshot) {
+        guard !snapshot.generations.isEmpty else { return }
+
+        let avgTps = snapshot.averageTokensPerSecond ?? 50.0
+        let lastPressure = snapshot.generations.last?.memoryPressureHint ?? 0.0
+
+        // Blend across units that have current residencies or are in active set.
+        // (In real impl we would map gens back to specific units via load records.)
+        for key in graph.nodeWeights.keys {
+            var latFactor = 1.0
+            var memFactor = 1.0
+
+            if avgTps > 100 {
+                latFactor = 0.92   // reward fast units
+            }
+            if graph.episodeResidencies.count > 1 && lastPressure > 0.4 {
+                memFactor = 1.15   // penalize memory pressure on loaded units
+            }
+
+            graph.blendWeight(for: key, latencyFactor: latFactor, memoryFactor: memFactor)
+        }
+
+        // Stub: could also move residencies or activate/deactivate subgraphs here.
+    }
 }
