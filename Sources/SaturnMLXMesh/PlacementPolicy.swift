@@ -274,6 +274,9 @@ public struct MeshComputationGraph: Sendable, Equatable {
     /// Supports Level 6/10 residency tracking + future cross-device KV movement.
     public private(set) var episodeResidencies: [UUID: String] = [:]
 
+    /// L8 Runtime DAG stages (first-class on the graph for modeling Router/Embedder/Vision/etc. and parallel subgraphs).
+    public private(set) var stages: [MeshStage] = []
+
     public init() {}
 
     public mutating func ensureDevice(_ device: Device) {
@@ -581,5 +584,97 @@ public struct PlacementEngine: Sendable {
         let d = decide(role: role, graph: graph)
         let cost = currentPlacementCost(for: role, unit: d.unit, graph: graph)
         return "role=\(role) -> unit=\(d.unit) cost=\(String(format: "%.2f", cost)) note=\(d.notes ?? "")"
+    }
+}
+
+// MARK: - L8 Runtime DAG / Stage Modeling (new phase start)
+
+/// Kinds of stages in the L8 Runtime DAG (Router, parallel experts like Drafter/Epi, Vision, etc.).
+/// These become first-class ModelComponents / subgraphs on the MeshComputationGraph.
+public enum RuntimeStageKind: String, Sendable, Equatable, Hashable, CaseIterable {
+    case router
+    case embedder
+    case vision
+    case reranker
+    case primaryLLM
+    case drafterProposer
+    case epiKVSource
+    // extensible for future (e.g. safety, rerank, etc.)
+}
+
+/// A pluggable stage in the Runtime DAG. Inspired by candidate-pipeline traits (Source/Hydrator/Scorer/SideEffect)
+/// and Grox PlanMaster stages. enable/run/sideEffect will be fleshed in executor sketch.
+public struct MeshStage: Sendable, Equatable, Hashable {
+    public let kind: RuntimeStageKind
+    public let id: String
+    public let label: String?
+
+    public init(kind: RuntimeStageKind, id: String, label: String? = nil) {
+        self.kind = kind
+        self.id = id
+        self.label = label
+    }
+}
+
+extension MeshComputationGraph {
+    /// Add a stage (as first-class L8 component on the graph).
+    public mutating func addStage(_ stage: MeshStage) {
+        if !stages.contains(stage) { stages.append(stage) }
+    }
+
+    /// Attach a DAG edge between stages (or stage <-> component). Reuses GraphEdge for now.
+    public mutating func addStageEdge(from: String, to: String, weight: EdgeWeight? = nil) {
+        let w = weight ?? EdgeWeight(latency: 0, bandwidth: 0, serialization: 0)
+        let edge = GraphEdge(from: from, to: to, weight: w)
+        if !edges.contains(edge) { edges.append(edge) }
+    }
+
+    /// Describe a small L8 parallel subgraph (e.g. EpiKVSource || DrafterProposer → merge).
+    /// For the toy in executor sketch. Returns the participating stage IDs.
+    public mutating func describeParallelSubgraph(sources: [MeshStage], merge: MeshStage) -> [String] {
+        addStage(merge)
+        var ids: [String] = [merge.id]
+        for s in sources {
+            addStage(s)
+            addStageEdge(from: s.id, to: merge.id)
+            ids.append(s.id)
+        }
+        return ids
+    }
+}
+
+// MARK: - L8 MeshGraphExecutor sketch (PlanMaster-style withTaskGroup + candidate-pipeline traits)
+
+/// Minimal executor for L8 Runtime DAG subgraphs. Uses withTaskGroup for parallel independent stages
+/// (Grox PlanMaster gather), then merge. Stages use enable/run/sideEffect pattern (candidate-pipeline).
+/// Side effects here mutate the graph (KV prime, residency mark, weight update, L7 edges) -- exactly
+/// like home-mixer side effects. Phoenix isolation note: parallel sources (Epi || Drafter) should not
+/// crosstalk; only attend to shared prompt/context.
+///
+/// This is a *sketch* + toy for one parallel case. Real would integrate model contexts, full isolation masks,
+/// and be driven by the PlacementEngine for cost-based stage placement.
+public struct MeshGraphExecutor {
+    public init() {}
+
+    /// Execute a toy parallel L8 subgraph: run sources concurrently, then merge.
+    /// `runSource` and `onMerge` are provided by caller (can be real stage logic or mocks for test).
+    /// After, caller can invoke side-effects on the graph (e.g. via engine.rewrite or direct).
+    public func executeParallelSubgraph(
+        graph: inout MeshComputationGraph,
+        sourceIDs: [String],
+        mergeID: String,
+        runSource: @escaping @Sendable (String) async -> Void,
+        onMerge: @escaping @Sendable ([String]) async -> Void
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            for id in sourceIDs {
+                group.addTask {
+                    await runSource(id)
+                }
+            }
+        }
+        await onMerge(sourceIDs)
+        // Example side-effect hook (in real use: KV prime for Epi source, L7 for drafter, rewrite for costs)
+        // graph.mark... or engine.rewrite(...) would be called by the stage implementations.
     }
 }

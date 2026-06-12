@@ -376,4 +376,51 @@ final class SaturnMLXMeshTests: XCTestCase {
         let unifiedCost = engine2.currentPlacementCost(for: .drafter, unit: .unified, graph: expensiveG)
         XCTAssertGreaterThan(gpuCost, unifiedCost, "graph cost for drafter on pressured gpu should exceed unified")
     }
+
+    // MARK: - New L8 phase: RuntimeStage modeling + toy MeshGraphExecutor (PlanMaster + candidate-pipeline)
+
+    func testL8StageModelingAndToyParallelExecutor() async {
+        var graph = MeshComputationGraph()
+
+        // 1. Modeling: add L8 stages (as first-class on graph, reusing components/edges for DAG).
+        let epiSource = MeshStage(kind: .epiKVSource, id: "epi1", label: "Epi KV retrieve+prime")
+        let drafterStage = MeshStage(kind: .drafterProposer, id: "draft1", label: "Drafter propose (L7)")
+        let primaryMerge = MeshStage(kind: .primaryLLM, id: "primary1", label: "Primary + verifier merge")
+
+        graph.addStage(epiSource)
+        graph.addStage(drafterStage)
+        graph.addStage(primaryMerge)
+
+        // Describe parallel subgraph (Epi || Drafter → Primary). Reuses L7/Epi as concrete.
+        let stageIDs = graph.describeParallelSubgraph(sources: [epiSource, drafterStage], merge: primaryMerge)
+        XCTAssertEqual(stageIDs.count, 3)
+        XCTAssertTrue(graph.stages.contains(epiSource))
+        XCTAssertTrue(graph.edges.contains { $0.from == "epi1" && $0.to == "primary1" })
+        XCTAssertTrue(graph.edges.contains { $0.from == "draft1" && $0.to == "primary1" })
+
+        // 2. Toy executor sketch (withTaskGroup for parallel sources, then merge).
+        // Closures are @Sendable; for toy we just invoke (in real they would do KV prime, L7 propose, graph side-effects like mark/rewrite).
+        let executor = MeshGraphExecutor()
+
+        await executor.executeParallelSubgraph(
+            graph: &graph,
+            sourceIDs: ["epi1", "draft1"],
+            mergeID: "primary1",
+            runSource: { _ in
+                // simulate work (e.g. Epi: retrieve+prime via KVManager; Drafter: L7 propose)
+            },
+            onMerge: { _ in
+                // simulate merge + side-effect (e.g. residency mark, engine.rewrite, L7 edge update)
+            }
+        )
+
+        // After toy, graph still has the modeled stages/subgraph (side-effects would mutate in real use).
+        XCTAssertTrue(graph.stages.contains(epiSource))
+        XCTAssertTrue(graph.stages.contains(drafterStage))
+        XCTAssertTrue(graph.stages.contains(primaryMerge))
+
+        // 3. Light integration note: the stages are now on the graph; engine could schedule their placement
+        // using current decide/rewrite (L7 awareness, costs, residencies). Toy shows Phoenix-style parallel
+        // without crosstalk (sources only "attend" to merge via onMerge).
+    }
 }
