@@ -1,0 +1,20 @@
+# SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+
+# Optional local state
+*.log
+tmp/
+run/
