@@ -17,8 +17,12 @@ import Foundation
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
-// HubClient.default and TokenizersLoader() come from MLXHuggingFace (part of
-// the mlx-swift-lm package).
+
+// The following two imports are required for the macro expansions
+// produced by #hubDownloader() and #huggingFaceTokenizerLoader()
+// (they come from the packages added in Package.swift for this real-loading pass).
+import HuggingFace
+import Tokenizers
 
 public enum ControlPlane: Sendable {
     case local          // running directly on a Saturn-Node (most common for v0.1)
@@ -60,14 +64,28 @@ public actor MeshSession {
         let decision = policy.decide(role: role)
         let loadStart = Date()
 
-        // v0.1 loader note:
-        // Replace this entire block with a working call to
-        // LLMModelFactory.shared.loadContainer(from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), ...)
-        // once the Tokenizers / swift-transformers product is added to Package.swift.
-        //
-        // For the skeleton we still create the actor-isolated MeshModel so that
-        // placement policy, telemetry recording, KV cache logic, TokenIterator usage,
-        // and the speculative path (with TODOs) can be validated without a real model download.
+        // Real loader (wired in the narrow real-loading first pass).
+        // Uses the exact macro form recommended by mlx-swift-lm and already
+        // documented in the previous skeleton stub.
+        let factory = LLMModelFactory.shared
+        let configuration = ModelConfiguration(id: id)
+
+        let container = try await factory.loadContainer(
+            from: #hubDownloader(),
+            using: #huggingFaceTokenizerLoader(),
+            configuration: configuration
+        )
+
+        var drafterContainer: ModelContainer?
+        if let drafterId {
+            let drafterConfig = ModelConfiguration(id: drafterId)
+            drafterContainer = try await factory.loadContainer(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: drafterConfig
+            )
+        }
+
         let loadDuration = Date().timeIntervalSince(loadStart)
 
         let model = MeshModel(
@@ -77,8 +95,7 @@ public actor MeshSession {
             telemetry: telemetry,
             speculativeGammaDefault: defaultSpeculativeGamma
         )
-        // No real container in skeleton mode — generate() will surface a clear error.
-        // Real loader would do: await model.attachContainer(container, drafter: drafterContainer)
+        await model.attachContainer(container, drafter: drafterContainer)
 
         await telemetry.recordLoad(
             modelID: id,
@@ -87,8 +104,6 @@ public actor MeshSession {
             loadDuration: loadDuration
         )
 
-        // For skeleton purposes we return the model. Callers that want real inference
-        // must implement the loader (see Docs/).
         return model
     }
 
