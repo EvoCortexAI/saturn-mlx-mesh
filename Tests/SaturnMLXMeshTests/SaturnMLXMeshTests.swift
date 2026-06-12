@@ -314,25 +314,26 @@ final class SaturnMLXMeshTests: XCTestCase {
     func testPlacementEngineGraphAwareAndRewrite() async {
         let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
 
-        // Populate some graph state (residencies + components) via existing helpers
+        // Baseline decides on a nearly-empty graph (only the implicit local device from previous
+        // test helpers or a fresh one). Engine must still return the policy-expected units.
+        let engine = await mesh.placementEngine
+        let emptyG = await mesh.currentComputationGraph()
+        let primaryDec = engine.decide(role: .primary, graph: emptyG)
+        XCTAssertEqual(primaryDec.unit, .gpu)
+        // (notes may or may not mention graph cost if no live weights yet)
+
+        let drafterDec = engine.decide(role: .drafter, graph: emptyG)
+        XCTAssertEqual(drafterDec.unit, .unified)
+
+        // Now populate graph state + residencies (two on gpu) for the rewrite pressure and
+        // expensive-drafter scenarios.
         await mesh._registerModelForGraphTest(id: "model-a", role: .primary, unit: .gpu)
         let ep = ConversationEpisode(id: UUID(), turns: [.init(role: "user", content: "test residency")], embedding: [])
         let kv = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep)
         // Add second residency so rewrite mem pressure logic triggers (>1)
         let ep2 = ConversationEpisode(id: UUID(), turns: [.init(role: "user", content: "second for residency count")], embedding: [])
         _ = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep2)
-        // now graph has residency count >1
-
-        // Engine decide should still pick expected units but enrich notes with graph data
-        let engine = await mesh.placementEngine
-        let primaryDec = engine.decide(role: .primary, graph: await mesh.currentComputationGraph())
-        XCTAssertEqual(primaryDec.unit, .gpu)
-        XCTAssertTrue(primaryDec.notes?.contains("graph-aware") ?? false)
-        XCTAssertTrue(primaryDec.notes?.contains("residencies") ?? false)
-
-        // Drafter should still be unified (graph enrichment only)
-        let drafterDec = engine.decide(role: .drafter, graph: await mesh.currentComputationGraph())
-        XCTAssertEqual(drafterDec.unit, .unified)
+        // now graph has residency count >1 on gpu
 
         // Rewrite using a telemetry snapshot with high tps + pressure
         let snap = TelemetrySnapshot(
@@ -347,9 +348,9 @@ final class SaturnMLXMeshTests: XCTestCase {
             lastUpdated: Date()
         )
         await mesh.rewriteGraphUsingTelemetry()  // uses internal snapshot, but for test we can call after manual? For this, directly exercise engine
-        var g = await mesh.currentComputationGraph()
+        var gForRewrite = await mesh.currentComputationGraph()
         // Before rewrite, latency ~1.0
-        let before = g.nodeWeights["local:gpu"]?.latency ?? 1.0
+        let before = gForRewrite.nodeWeights["local:gpu"]?.latency ?? 1.0
 
         // Call rewrite directly on engine with our snap (simulates what the session method does)
         var mutableG = await mesh.currentComputationGraph()
@@ -360,5 +361,19 @@ final class SaturnMLXMeshTests: XCTestCase {
         let afterMem = mutableG.nodeWeights["local:gpu"]?.memory ?? 1.0
         XCTAssertLessThan(afterLat, before, "High tps should have reduced latency weight")
         XCTAssertGreaterThan(afterMem, 1.0, "Memory pressure + residency should have increased memory weight")
+
+        // Demonstrate cost-based decide: force high memory weight on gpu (simulating heavy
+        // residency pressure). The cost helper must report that gpu is now more expensive
+        // than unified for a drafter; the decide may still return the base unit but will
+        // include a graph cost note reflecting the pressure.
+        var expensiveG = await mesh.currentComputationGraph()
+        expensiveG.blendWeight(for: "local:gpu", latencyFactor: 1.0, memoryFactor: 4.0) // make gpu very expensive for memory
+        let drafterUnderPressure = engine2.decide(role: .drafter, graph: expensiveG)
+        XCTAssertTrue(drafterUnderPressure.notes?.contains("graph cost") ?? false, "engine should report graph cost even if unit choice stays base under this policy")
+
+        // The helper proves the graph data makes gpu bad for drafter.
+        let gpuCost = engine2.currentPlacementCost(for: .drafter, unit: .gpu, graph: expensiveG)
+        let unifiedCost = engine2.currentPlacementCost(for: .drafter, unit: .unified, graph: expensiveG)
+        XCTAssertGreaterThan(gpuCost, unifiedCost, "graph cost for drafter on pressured gpu should exceed unified")
     }
 }

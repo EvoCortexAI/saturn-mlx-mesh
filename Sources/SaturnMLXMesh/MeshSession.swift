@@ -157,6 +157,10 @@ public actor MeshSession {
             loadDuration: loadDuration
         )
 
+        // Fresh rewrite after load (graph now contains the just-placed component + any prior residencies).
+        // This lets subsequent decide() calls and cost explanations see up-to-date state.
+        await self.rewriteGraphUsingTelemetry()
+
         return model
     }
 
@@ -174,6 +178,9 @@ public actor MeshSession {
     /// Call this after each user/assistant exchange for long-context support.
     public func ingest(turns: [ConversationTurn]) async {
         await episodicMemory.ingest(turns: turns)
+        // After ingest we may have built (or will soon build) episode KV caches.
+        // Run a rewrite so the graph immediately reflects any new residency pressure.
+        await self.rewriteGraphUsingTelemetry()
     }
 
     /// Retrieve relevant episode text (v0.2) to augment a prompt.
@@ -215,12 +222,17 @@ public actor MeshSession {
         let augmented = context + prompt
         // _kv (EpisodeKVCache?) + kvCacheManager.getRealCache(_kv?.episodeID) available
         // for future model.generate priming (TokenIterator can start from prefilled episode cache).
-        return try await model.generate(
+        let stream = try await model.generate(
             prompt: augmented,
             maxTokens: maxTokens,
             temperature: temperature,
             speculativeGamma: speculativeGamma
         )
+
+        // Phase 3: after a generation that produced telemetry, let the engine rewrite the graph
+        // (incorporates tps / memory pressure + current residencies into live w(v)).
+        await self.rewriteGraphUsingTelemetry()
+        return stream
     }
 
     /// Test/simulation helper: populate the graph for a model handle without
