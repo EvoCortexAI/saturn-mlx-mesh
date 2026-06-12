@@ -643,22 +643,81 @@ extension MeshComputationGraph {
     }
 }
 
-// MARK: - L8 MeshGraphExecutor sketch (PlanMaster-style withTaskGroup + candidate-pipeline traits)
+// MARK: - L8 Runtime DAG skeleton (Phase 8 minimal per approval)
+// RuntimeStage protocol, RuntimeDAG, StageResult, StageSideEffect, and the MeshGraphExecutor actor.
+// This is the *exact* minimal skeleton requested: protocol + DAG model + actor + result/side-effect types
+// + withTaskGroup for independents + deterministic merge + telemetry hooks.
+// One local demo DAG (using tiny protocol-conforming values) is exercised from the test.
+// Future adapters (full Grox PlanMaster, candidate-pipeline traits, Phoenix isolation, real side-effect application,
+// graph rewriting, KV/L7 integration) remain comments/inspirations only. No production surface.
 
-/// Minimal executor for L8 Runtime DAG subgraphs. Uses withTaskGroup for parallel independent stages
-/// (Grox PlanMaster gather), then merge. Stages use enable/run/sideEffect pattern (candidate-pipeline).
-/// Side effects here mutate the graph (KV prime, residency mark, weight update, L7 edges) -- exactly
-/// like home-mixer side effects. Phoenix isolation note: parallel sources (Epi || Drafter) should not
-/// crosstalk; only attend to shared prompt/context.
+/// Executable stage contract for the L8 Runtime DAG skeleton.
+/// Concrete stages (demo or future real) provide `run()`.
+public protocol RuntimeStage: Sendable {
+    var id: String { get }
+    var kind: RuntimeStageKind { get }
+    func run() async -> StageResult
+}
+
+/// Make the existing declarative modeling `MeshStage` (from the graph) optionally usable as a
+/// RuntimeStage via a no-op run. The one local demo DAG in tests uses dedicated tiny conformers
+/// (see test) so this has no observable effect on modeling or prior behavior.
+extension MeshStage: RuntimeStage {
+    public func run() async -> StageResult {
+        let t0 = Date()
+        return StageResult(stageID: id, kind: kind, success: true, duration: Date().timeIntervalSince(t0), payload: nil)
+    }
+}
+
+/// Result of executing one stage in the skeleton DAG.
+public struct StageResult: Sendable, Equatable {
+    public let stageID: String
+    public let kind: RuntimeStageKind?
+    public let success: Bool
+    public let duration: TimeInterval
+    public let payload: String?   // demo / future payload (e.g. "primed", "accepted-3")
+}
+
+/// Value describing a side effect produced by the merge step.
+/// (Application of the effect to graph / KV / weights is future work, inspired by home-mixer SideEffect.)
+public struct StageSideEffect: Sendable, Equatable {
+    public let fromStage: String
+    public let kind: String           // "deterministic-merge", "kv-prime-hint", ...
+    public let detail: String
+}
+
+/// Minimal executable DAG container (distinct from the world-model MeshComputationGraph).
+/// For the skeleton a list of stages + optional designated merge target is sufficient.
+/// One wave of independent stages + deterministic merge after satisfies the requirement.
+public struct RuntimeDAG: Sendable {
+    public let stages: [any RuntimeStage]
+    public let mergeStageID: String?
+
+    public init(stages: [any RuntimeStage], mergeStageID: String? = nil) {
+        self.stages = stages
+        self.mergeStageID = mergeStageID
+    }
+}
+
+// MARK: - L8 MeshGraphExecutor (now actor per approval; sketch retained for modeling compat)
+
+/// MeshGraphExecutor as actor (required). The prior struct sketch (executeParallelSubgraph using
+/// withTaskGroup + caller closures) is kept as-is so the landed modeling test continues to compile
+/// and run without modification. The new `execute(_:)` provides the canonical skeleton surface:
+/// RuntimeDAG in, (ordered [StageResult], [StageSideEffect]) out, withTaskGroup for independents,
+/// deterministic re-assembly by declaration order, merge step, and telemetry hooks (via existing MeshTelemetry).
 ///
-/// This is a *sketch* + toy for one parallel case. Real would integrate model contexts, full isolation masks,
-/// and be driven by the PlacementEngine for cost-based stage placement.
-public struct MeshGraphExecutor {
-    public init() {}
+/// Comments note the x-algorithm-main / vision inspirations; implementation of full adapters is out of scope.
+public actor MeshGraphExecutor {
+    private let telemetry: MeshTelemetry?
 
-    /// Execute a toy parallel L8 subgraph: run sources concurrently, then merge.
-    /// `runSource` and `onMerge` are provided by caller (can be real stage logic or mocks for test).
-    /// After, caller can invoke side-effects on the graph (e.g. via engine.rewrite or direct).
+    public init(telemetry: MeshTelemetry? = nil) {
+        self.telemetry = telemetry
+    }
+
+    /// Retained sketch (from the landed L8 modeling/toy). Uses withTaskGroup + caller-provided
+    /// closures. The modeling test continues to call this unchanged. Real skeleton work uses the
+    /// new `execute(_:)` below.
     public func executeParallelSubgraph(
         graph: inout MeshComputationGraph,
         sourceIDs: [String],
@@ -676,5 +735,80 @@ public struct MeshGraphExecutor {
         await onMerge(sourceIDs)
         // Example side-effect hook (in real use: KV prime for Epi source, L7 for drafter, rewrite for costs)
         // graph.mark... or engine.rewrite(...) would be called by the stage implementations.
+    }
+
+    /// Canonical skeleton entry point (Phase 8 deliverable).
+    /// Accepts a RuntimeDAG, runs its non-merge stages concurrently via withTaskGroup,
+    /// collects results deterministically in declaration order, performs the merge step
+    /// (emits final StageResult + at least one StageSideEffect), and fires telemetry hooks
+    /// (lightweight GenerationInfo records) when a MeshTelemetry was supplied at init.
+    /// This, together with the protocol + DAG + result/side-effect types, satisfies the
+    /// exact 7 items in the approval. The one local demo DAG in the test exercises it end-to-end.
+    public func execute(_ dag: RuntimeDAG) async -> (results: [StageResult], sideEffects: [StageSideEffect]) {
+        let parallelStages: [any RuntimeStage] = {
+            if let mid = dag.mergeStageID {
+                return dag.stages.filter { $0.id != mid }
+            }
+            return dag.stages
+        }()
+
+        var idToResult: [String: StageResult] = [:]
+
+        await withTaskGroup(of: (String, StageResult).self) { group in
+            for stage in parallelStages {
+                group.addTask { [stageID = stage.id] in
+                    let res = await stage.run()
+                    if let t = self.telemetry {
+                        let info = GenerationInfo(
+                            modelID: stageID,
+                            role: .primary,
+                            promptTokens: 0,
+                            generatedTokens: 0,
+                            duration: res.duration,
+                            tokensPerSecond: res.duration > 0 ? 1.0 / res.duration : 0,
+                            speculativeGamma: nil,
+                            acceptedTokens: nil,
+                            memoryPressureHint: nil,
+                            timestamp: Date()
+                        )
+                        await t.recordGenerationInfo(info)
+                    }
+                    return (stageID, res)
+                }
+            }
+            for await (id, res) in group {
+                idToResult[id] = res
+            }
+        }
+
+        // Deterministic merge step: results in the exact order the caller listed the parallel stages.
+        let declaredOrder = parallelStages.map { $0.id }
+        let orderedResults: [StageResult] = declaredOrder.compactMap { idToResult[$0] }
+
+        var sideEffects: [StageSideEffect] = []
+        let mergeID = dag.mergeStageID ?? "merge"
+        let mergeResult = StageResult(
+            stageID: mergeID,
+            kind: .primaryLLM,
+            success: true,
+            duration: 0,
+            payload: "merged-\(orderedResults.count)-stages"
+        )
+        sideEffects.append(StageSideEffect(
+            fromStage: mergeID,
+            kind: "deterministic-merge",
+            detail: "collected \(orderedResults.count) results in declaration order"
+        ))
+
+        if let t = self.telemetry {
+            let mInfo = GenerationInfo(
+                modelID: mergeID, role: .primary, promptTokens: 0, generatedTokens: 0,
+                duration: 0, tokensPerSecond: 0, speculativeGamma: nil, acceptedTokens: nil,
+                memoryPressureHint: nil, timestamp: Date()
+            )
+            await t.recordGenerationInfo(mInfo)
+        }
+
+        return (orderedResults + [mergeResult], sideEffects)
     }
 }

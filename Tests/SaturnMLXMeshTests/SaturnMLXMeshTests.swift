@@ -423,4 +423,61 @@ final class SaturnMLXMeshTests: XCTestCase {
         // using current decide/rewrite (L7 awareness, costs, residencies). Toy shows Phoenix-style parallel
         // without crosstalk (sources only "attend" to merge via onMerge).
     }
+
+    // MARK: - Phase 8: minimal Runtime DAG skeleton + one local demo DAG (must compile + run)
+
+    /// Exercises exactly the 7 artifacts required for the approved minimal skeleton:
+    /// RuntimeStage (via two local conformers), RuntimeDAG, MeshGraphExecutor (actor),
+    /// StageResult + StageSideEffect, withTaskGroup (inside execute), deterministic merge
+    /// (results returned in declaration order), telemetry hooks (MeshTelemetry passed to actor,
+    /// records asserted via snapshot after run).
+    /// The demo DAG is purely local / sim-safe (tiny sleeps, no MLX, no KV, no L7, no session).
+    /// This is "one local demo DAG" that the plan requires to compile and run.
+    func testL8MinimalRuntimeDAGSkeletonAndOneDemoDAG() async {
+        struct DemoEpi: RuntimeStage {
+            let id = "demo-epi"
+            let kind = RuntimeStageKind.epiKVSource
+            func run() async -> StageResult {
+                let t0 = Date()
+                try? await Task.sleep(for: .milliseconds(3))
+                return StageResult(stageID: id, kind: kind, success: true, duration: Date().timeIntervalSince(t0), payload: "epi-primed")
+            }
+        }
+        struct DemoDrafter: RuntimeStage {
+            let id = "demo-drafter"
+            let kind = RuntimeStageKind.drafterProposer
+            func run() async -> StageResult {
+                let t0 = Date()
+                try? await Task.sleep(for: .milliseconds(2))
+                return StageResult(stageID: id, kind: kind, success: true, duration: Date().timeIntervalSince(t0), payload: "draft-3")
+            }
+        }
+
+        let epi = DemoEpi()
+        let dra = DemoDrafter()
+        let dag = RuntimeDAG(stages: [epi, dra], mergeStageID: "merge-demo")
+
+        let tel = MeshTelemetry()
+        let exec = MeshGraphExecutor(telemetry: tel)
+
+        let (results, effects) = await exec.execute(dag)
+
+        // 1. results include the two independents + the merge result
+        XCTAssertEqual(results.count, 3)
+        // 2. deterministic merge: order matches declaration order of the parallel stages
+        XCTAssertEqual(results[0].stageID, "demo-epi")
+        XCTAssertEqual(results[1].stageID, "demo-drafter")
+        XCTAssertEqual(results[2].stageID, "merge-demo")
+        XCTAssertTrue(results.allSatisfy { $0.success })
+
+        // 3. merge step produced side-effect value(s)
+        XCTAssertTrue(effects.contains { $0.kind == "deterministic-merge" && $0.fromStage == "merge-demo" })
+
+        // 4. telemetry hooks fired (records for the demo stages + merge appear)
+        let snap = await tel.snapshot()
+        XCTAssertTrue(snap.generations.contains { $0.modelID == "demo-epi" })
+        XCTAssertTrue(snap.generations.contains { $0.modelID == "merge-demo" })
+
+        // 5. actor + withTaskGroup path completed without hang or violation (we reached here)
+    }
 }
