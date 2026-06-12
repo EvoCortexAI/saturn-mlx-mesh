@@ -9,11 +9,11 @@
 // - speculativeGamma API surface + telemetry
 // - placement decision carried on the model
 //
-// Inside ModelContainer.perform we are in a Sendable context, so we avoid
-// capturing non-Sendable caches directly. Full TokenIterator + explicit
-// cache reuse + draftCache will be enabled in a follow-up once the
-// non-Sendable KVCache story is handled (common pattern is a dedicated
-// cache owner or copying offsets).
+// KV cache reuse is now implemented for the main generation path using
+// an internal CacheBox (the standard pattern to bridge the non-Sendable
+// [any KVCache] across the Sendable perform closure). The cache is created
+// on first use and reused for subsequent generate calls on the same model
+// (the core requirement for efficient multi-turn / chat usage).
 
 import Foundation
 import MLXLLM
@@ -44,6 +44,15 @@ public actor MeshModel {
 
     // Test hook for skeleton-hardening tests (stream finish, telemetry truth)
     private var simulateSuccessForTest = false
+
+    // Internal box to hold the KV cache across generate calls.
+    // This is the standard @unchecked Sendable holder pattern to allow
+    // the non-Sendable [any KVCache] to be referenced from inside the
+    // Sendable closure passed to ModelContainer.perform.
+    private final class KVCacheBox: @unchecked Sendable {
+        var cache: [any KVCache]?
+    }
+    private let kvCacheBox = KVCacheBox()
 
     init(
         id: String,
@@ -144,20 +153,31 @@ public actor MeshModel {
                                 continuation: continuation
                             )
                         } else {
-                            // Standard generation.
-                            // TODO: switch to TokenIterator + explicit newCache reuse
-                            // once non-Sendable KVCache capture is solved cleanly.
-                            let stream = try MLXLMCommon.generate(
-                                input: input,
-                                parameters: params,
-                                context: context
-                            )
-                            var c = 0
-                            for await gen in stream {
-                                if case .chunk(let text) = gen, !text.isEmpty {
-                                    continuation.yield(GeneratedToken(text: text, tokenID: nil))
-                                    c += 1
+                            // Standard generation with explicit KV cache reuse.
+                            // The cache lives in kvCacheBox (see class above) so it is
+                            // reused on the next call to generate() on this model.
+                            if self.kvCacheBox.cache == nil {
+                                var cacheParams = params
+                                if let hint = self.placement.maxKVSizeHint {
+                                    cacheParams.maxKVSize = hint
                                 }
+                                self.kvCacheBox.cache = context.model.newCache(parameters: cacheParams)
+                            }
+                            let cache = self.kvCacheBox.cache!
+
+                            let tokenIterator = try TokenIterator(
+                                input: input,
+                                model: context.model,
+                                cache: cache,
+                                parameters: params
+                            )
+
+                            var c = 0
+                            // TokenIterator yields raw token IDs. We decode for the stream.
+                            for token in tokenIterator {
+                                let text = context.tokenizer.decode(tokenIds: [token])
+                                continuation.yield(GeneratedToken(text: text, tokenID: token))
+                                c += 1
                                 if c >= maxTokens { break }
                             }
                             return c
