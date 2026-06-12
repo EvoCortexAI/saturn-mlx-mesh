@@ -28,7 +28,8 @@ for try await token in stream {
 - `MeshModel` — actor-isolated, generation (standard + speculativeGamma surface with real drafter usage), KV cache reuse via `TokenIterator` + `KVCacheBox`, telemetry hooks
 - `PlacementPolicy` + `AppleSiliconBalanced` — `MeshExecutionUnit`, `PlacementDecision`, `decide(role:)` with explicit `NodeWeight`/`EdgeWeight` cost model (w(v) + w(e))
 - `MeshTelemetry` — actor for load + generation records (truthful speculative fields)
-- Graph foundation types (`Device`, `SiliconExecutionUnit`, `NodeWeight`, `EdgeWeight`, `ModelComponent`) modeling the multi-level computation graph (Device/Silicon/Model/Placement/MoE/Mesh/Speculative/Runtime DAG/Weighted/Full)
+- Graph foundation types (`Device`, `SiliconExecutionUnit`, `NodeWeight`, `EdgeWeight`, `ModelComponent`, `episodeResidencies`) modeling the multi-level computation graph (Device/Silicon/Model/Placement/MoE/Mesh/Speculative/Runtime DAG/Weighted/Full) with live residency tracking for episodic memory
+- `KVCacheManager` + `LayerBudgetAllocator` + `EpisodeKVCache` for per-episode compressed KV caches (v0.3+ EpiCache: real MLX support, allocator-driven layer budgets, graph residency)
 
 ## Status (progressing toward full weighted computation graph)
 
@@ -45,8 +46,9 @@ for try await token in stream {
 - ✅ Opt-in hardware smoke executable (`SaturnMLXMeshSmoke`) for real inference (excluded from `swift test`)
 - ✅ v0.2 EpisodicMemoryIndex (text-level): utterance segmentation, embedding, K-means episodes, retrieval for long-context augmentation. Integrated into MeshSession.
 - Simulation hook (`_enableTestSuccessSimulation()`) preserved so unit tests/CI require no model weights or GPU
-- KVCacheManager and LayerBudgetAllocator skeletons added (real MLX KV compression + layer budgets in v0.3+)
-- See [CHANGELOG.md](CHANGELOG.md) for the full adopted graph vision (10 levels: Device Graph → Full Saturn Graph) and detailed milestone history.
+- ✅ Phase 2: `KVCacheManager` + `EpisodeKVCache` (real MLX KV via @unchecked boxes, prefilled donation for block prefill, `getRealCache`/`storePrefilledCache` for priming) + `LayerBudgetAllocator` (sensitivity-aware per-layer budgets using proportional + largest-remainder) fully wired. Graph residency (`episodeResidencies` + `markEpisodeResidency`) ties episodic memory into the weighted DAG.
+- 11/11 tests (new coverage for allocator math, manager build/retrieve/store, session KV + graph residency).
+- See [CHANGELOG.md](CHANGELOG.md) for the full adopted graph vision (10 levels: Device Graph → Full Saturn Graph) and detailed milestone history. See the elaboration in [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for Phase 2 integration with the vision and x-algorithm-main patterns (candidate-pipeline side effects, PlanMaster, Phoenix two-tower + isolation).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full adopted Saturn Mesh graph vision (the 10-level weighted directed computation graph) and detailed history. See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for additional rollout notes and math references (placement cost model, speculative speedup formula).
 
@@ -75,13 +77,14 @@ Nodes register capabilities with labels such as `["mlx", "primary"]`. This libra
 
 ## Next (aligned with the graph vision + EpiCache memory)
 
-- v0.3: Real MLX KV cache hooks + block-wise prefill + per-episode `EpisodeKVCache` objects + KVCacheManager integration.
-- v0.4: Sensitivity-aware layer budget allocation (LayerBudgetAllocator) when building compressed episode caches.
-- Full verifier/drafter speculative acceptance (already partially wired; complete propose + verify path with cache rollback).
-- Cross-device support (Device Graph, Mesh Expert Graph) and remote `ControlPlane`.
-- Runtime DAG representation (Router, Embedder, Vision, etc.) and basic `MeshKVCache` / scheduler that optimizes min ∑w(v) + ∑w(e).
-- Real-hardware validation + hybrid RAG + episodic KV memory in production flows.
-- Expand to full MeshKVCache abstraction: full session + episodic caches + layer policies + remote residency + refresh protocol.
+**Phase 2 (completed):** Real MLX KV cache hooks, block-wise prefill (via prefilled donation), per-episode `EpisodeKVCache` objects (with `LayerBudgetAllocator`), full `KVCacheManager` integration, and graph residency tracking. See elaboration in Docs/ and CHANGELOG for vision + x-algorithm-main mappings.
+
+1. Complete / harden full verifier/drafter speculative acceptance (propose + verify/accept/reject + rollback) and integrate with episodic + KV memory (L7 subgraph now has resident KV).
+2. Cross-device Device Graph / Mesh Expert Graph support and remote `ControlPlane` execution (L6; residency enables costed KV movement).
+3. Runtime DAG modeling (Router, Embedder, Vision, Reranker as first-class `ModelComponent`s) + basic `MeshKVCache` / graph scheduler that optimizes min ∑w(v) + ∑w(e) using live telemetry + residency (L8/L9/L10; Phase 3 target).
+4. Real-hardware validation, hybrid RAG + episodic KV flows, and expansion of the smoke/benchmark targets.
+
+See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for the full elaborated integration note (Phase 2 as graph-resident memory, direct mappings to candidate-pipeline side effects / PlanMaster / Phoenix isolation / Thunder) and revised roadmap.
 
 ## License / Copyright
 
