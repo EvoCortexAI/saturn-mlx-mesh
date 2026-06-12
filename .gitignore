@@ -18,3 +18,5 @@ DerivedData/
 *.log
 tmp/
 run/
+# SwiftPM resolved dependencies (reproducible builds can be achieved with exact swift-tools-version)
+Package.resolved

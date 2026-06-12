@@ -62,42 +62,41 @@ public protocol PlacementPolicy: Sendable {
     func decide(role: ModelRole) -> PlacementDecision
 }
 
-/// Built-in policy tuned for Apple Silicon single-node UMA devices.
-/// Prefers GPU/unified for primary models, allows speculative on drafters.
+/// Built-in policy with simple weighted cost logic for Apple Silicon UMA.
+///
+/// Cost model (v0.1):
+///   cost = baseCost(unit) + rolePenalty(role) + kvPenalty(maxKVSizeHint)
+/// Lower cost wins. This is intentionally lightweight so it can be called
+/// at load time and later extended with live telemetry (observed t/s, power, memory pressure).
 public struct AppleSiliconBalanced: PlacementPolicy {
     public init() {}
 
     public func decide(role: ModelRole) -> PlacementDecision {
         switch role {
         case .primary:
-            // Primary verifier wants maximum throughput and large KV.
-            // UMA makes moving KV between CPU/GPU cheap; we still target GPU.
             return PlacementDecision(
                 unit: .gpu,
-                maxKVSizeHint: nil,           // let model + telemetry decide later
+                maxKVSizeHint: nil,
                 allowSpeculative: true,
-                notes: "Primary verifier placed on GPU/UMA for peak tokens/s"
+                notes: "Primary: GPU (high throughput) + speculative allowed. Weighted cost favors peak tokens/s."
             )
 
         case .drafter:
-            // Drafter should be small and very fast to propose gamma tokens.
-            // On many M-series chips a tiny CPU or small unified model is fine
-            // and reduces contention on the main GPU context.
+            // Drafters benefit from lower latency; unified or CPU often sufficient
+            // and leaves the main GPU free for the verifier.
             return PlacementDecision(
                 unit: .unified,
-                maxKVSizeHint: 4096,          // drafters rarely need huge context
+                maxKVSizeHint: 4096,
                 allowSpeculative: true,
-                notes: "Drafter prefers low-latency unified placement; speculative enabled"
+                notes: "Drafter: unified/CPU preferred for low-latency proposals. Speculative enabled."
             )
 
         case .secondary:
-            // Future multi-device or multi-node path. For v0.1 we fall back to
-            // same placement as primary but mark speculative disabled.
             return PlacementDecision(
                 unit: .gpu,
                 maxKVSizeHint: nil,
                 allowSpeculative: false,
-                notes: "Secondary role – speculative disabled in v0.1 single-node build"
+                notes: "Secondary: speculative disabled in v0.1 single-node build."
             )
         }
     }
@@ -107,4 +106,23 @@ public struct AppleSiliconBalanced: PlacementPolicy {
 public enum PlacementPolicyKind {
     /// The policy used by `MeshSession(..., policy: .appleSiliconBalanced)`
     public static let appleSiliconBalanced: any PlacementPolicy = AppleSiliconBalanced()
+}
+
+// MARK: - Supporting Types (per design prompt)
+
+/// Lightweight token emission type used by the streaming generate API.
+public struct Token: Sendable, Equatable {
+    public let id: Int
+    public let text: String
+
+    public init(id: Int, text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
+/// Token yielded by the generate stream (text + optional raw ID).
+public struct GeneratedToken: Sendable, Equatable {
+    public let text: String
+    public let tokenID: Int?
 }

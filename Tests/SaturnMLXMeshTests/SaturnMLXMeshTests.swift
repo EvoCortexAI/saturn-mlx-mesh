@@ -15,7 +15,7 @@
 import XCTest
 @testable import SaturnMLXMesh
 
-final class MeshModelTests: XCTestCase {
+final class SaturnMLXMeshTests: XCTestCase {
 
     func testAppleSiliconBalancedPolicyDecisions() {
         let policy = PlacementPolicyKind.appleSiliconBalanced

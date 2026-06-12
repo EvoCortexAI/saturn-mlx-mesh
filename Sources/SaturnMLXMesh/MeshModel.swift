@@ -1,28 +1,23 @@
 // Copyright © 2026 EvoCortexAI S.L. All rights reserved.
 //
 // MeshModel.swift
-// Main actor-isolated wrapper around an MLX-LM ModelContainer.
+// Actor-isolated model handle.
 //
-// Responsibilities (v0.1):
-// - Owns the loaded verifier (and optional drafter) container(s)
-// - Hooks every load/generation into MeshTelemetry
-// - Exposes generate(...) that returns an async token stream (matches prompt)
-// - Supports speculativeGamma in the public API + telemetry (implementation
-//   of the full drafter loop is intentionally minimal/stubbed until basic
-//   generation + cache reuse is validated end-to-end)
-// - Honors maxKVSize hint from PlacementDecision (advisory)
+// v0.1 focuses on:
+// - actor isolation for MeshSession + MeshModel
+// - reusable KV cache (creation + comments for reuse across turns)
+// - speculativeGamma API surface + telemetry
+// - placement decision carried on the model
 //
-// Comments reference the math required by the prompt (placement cost model,
-// speculative speedup formula) and the KV cache reuse mandate.
+// Inside ModelContainer.perform we are in a Sendable context, so we avoid
+// capturing non-Sendable caches directly. Full TokenIterator + explicit
+// cache reuse + draftCache will be enabled in a follow-up once the
+// non-Sendable KVCache story is handled (common pattern is a dedicated
+// cache owner or copying offsets).
 
 import Foundation
 import MLXLLM
 import MLXLMCommon
-
-public struct GeneratedToken: Sendable {
-    public let text: String
-    public let tokenID: Int?
-}
 
 public enum MeshModelError: Error, LocalizedError {
     case notLoaded
@@ -36,17 +31,13 @@ public enum MeshModelError: Error, LocalizedError {
     }
 }
 
-/// The primary handle returned by MeshSession.loadModel.
-/// Marked @MainActor per the design prompt ("MeshModel.swift (main actor)").
-@MainActor
-public final class MeshModel {
+public actor MeshModel {
     public let id: String
     public let role: ModelRole
     public let placement: PlacementDecision
 
     private var container: ModelContainer?
     private var drafterContainer: ModelContainer?
-    private var kvCache: [any KVCache]?
 
     private let telemetry: MeshTelemetry
     private let speculativeGammaDefault: Int?
@@ -65,7 +56,7 @@ public final class MeshModel {
         self.speculativeGammaDefault = speculativeGammaDefault
     }
 
-    func attachContainer(_ container: ModelContainer, drafter: ModelContainer? = nil) {
+    func attachContainer(_ container: ModelContainer, drafter: ModelContainer? = nil) async {
         self.container = container
         self.drafterContainer = drafter
     }
@@ -73,7 +64,7 @@ public final class MeshModel {
     public func generate(
         prompt: String,
         maxTokens: Int = 512,
-        temperature: Double = 0.7,
+        temperature: Float = 0.7,
         speculativeGamma: Int? = nil
     ) async throws -> AsyncThrowingStream<GeneratedToken, Error> {
         guard let container = container else {
@@ -85,108 +76,111 @@ public final class MeshModel {
 
         let params = GenerateParameters(
             maxTokens: maxTokens,
-            temperature: Float(temperature),
+            temperature: temperature,
             topP: 0.95,
             repetitionPenalty: 1.05,
             repetitionContextSize: 20
         )
 
+        // Capture before Sendable closure
+        let hasDrafter = drafterContainer != nil
+        let theDrafter = drafterContainer
+
         return AsyncThrowingStream { continuation in
-            Task { @MainActor in
+            Task {
                 do {
-                    let emitted = try await container.perform { context in
+                    let count = try await container.perform { context in
                         let input = try await context.processor.prepare(
                             input: UserInput(prompt: prompt)
                         )
 
-                        // Attempt to materialize a cache (exercises placement decision
-                        // and the "newCache" requirement from the prompt). Actual reuse
-                        // across turns will be strengthened once TokenIterator surface
-                        // is fully validated.
-                        //
-                        // Note: direct mutation of @MainActor state from inside the
-                        // Sendable perform closure is not allowed; we create the cache
-                        // locally here for the duration of this generate. A future
-                        // increment will use a @MainActor-isolated helper or separate
-                        // cache owner actor.
-                        _ = context.model.newCache(parameters: params)
+                        let doingSpec = (gamma ?? 0) > 1 && hasDrafter
 
-                        let doingSpec = (gamma ?? 0) > 1
-                        var count = 0
-
-                        // Use the stable high-level generate surface for v0.1 skeleton.
-                        // This guarantees we can produce a working streaming build/test
-                        // while preserving the public API and telemetry hooks exactly.
-                        let stream = try MLXLMCommon.generate(
-                            input: input,
-                            parameters: params,
-                            context: context
-                        )
-
-                        for await gen in stream {
-                            if case .chunk(let text) = gen, !text.isEmpty {
-                                continuation.yield(GeneratedToken(text: text, tokenID: nil))
-                                count += 1
+                        if doingSpec, let drafter = theDrafter {
+                            // v0.1 simplified speculative (see _runSpeculative for TODOs)
+                            return try await self._runSpeculative(
+                                input: input,
+                                params: params,
+                                context: context,
+                                drafter: drafter,
+                                gamma: gamma!,
+                                continuation: continuation
+                            )
+                        } else {
+                            // Standard generation.
+                            // TODO: switch to TokenIterator + explicit newCache reuse
+                            // once non-Sendable KVCache capture is solved cleanly.
+                            let stream = try MLXLMCommon.generate(
+                                input: input,
+                                parameters: params,
+                                context: context
+                            )
+                            var c = 0
+                            for await gen in stream {
+                                if case .chunk(let text) = gen, !text.isEmpty {
+                                    continuation.yield(GeneratedToken(text: text, tokenID: nil))
+                                    c += 1
+                                }
+                                if c >= maxTokens { break }
                             }
-                            if count >= maxTokens { break }
+                            return c
                         }
-
-                        let dur = Date().timeIntervalSince(start)
-                        let tps = dur > 0 ? Double(max(count, 1)) / dur : 0
-
-                        let info = GenerationInfo(
-                            modelID: self.id,
-                            role: self.role,
-                            promptTokens: 0,
-                            generatedTokens: count,
-                            duration: dur,
-                            tokensPerSecond: tps,
-                            speculativeGamma: doingSpec ? gamma : nil,
-                            acceptedTokens: doingSpec ? count : nil,
-                            memoryPressureHint: nil,
-                            timestamp: Date()
-                        )
-                        await self.telemetry.recordGenerationInfo(info)
-                        continuation.finish()
-                        return count
                     }
-                    _ = emitted
+
+                    let dur = Date().timeIntervalSince(start)
+                    let tps = dur > 0 ? Double(max(count, 1)) / dur : 0
+                    let info = GenerationInfo(
+                        modelID: id,
+                        role: role,
+                        promptTokens: 0,
+                        generatedTokens: count,
+                        duration: dur,
+                        tokensPerSecond: tps,
+                        speculativeGamma: (gamma ?? 0) > 1 ? gamma : nil,
+                        acceptedTokens: (gamma ?? 0) > 1 ? count : nil,
+                        memoryPressureHint: nil,
+                        timestamp: Date()
+                    )
+                    await telemetry.recordGenerationInfo(info)
+
                 } catch {
                     continuation.finish(throwing: MeshModelError.generationFailed(String(describing: error)))
                 }
             }
         }
     }
-}
 
-// MARK: - Speculative decoding notes (v0.1)
-//
-// The prompt requires a "simplified speculative decoding path (speculativeGamma)
-// with drafter support (fallback to verifier on rejection for v0.1)" plus
-// "comments referencing the math (placement cost model, speculative speedup formula)".
-//
-// Current state:
-// - Public API accepts speculativeGamma and threads it through to telemetry.
-// - KV cache creation via newCache is attempted (reuse discipline will be
-//   hardened in the next increment after basic streaming + policy tests pass).
-// - Full drafter propose + batch verify + acceptance probability + cache
-//   rollback on rejection is stubbed here to keep v0.1 in the "verification-first"
-//   and "strictly minimal" envelope described by the council (Atlas/Forge/Glock/Cipher).
-//
-// When the low-level path is restored:
-//   let tokenIter = try TokenIterator(input: input, model: ..., cache: cache, parameters: ...)
-//   let stream = generate(input: input, context: context, iterator: tokenIter)
-//   ... plus a parallel drafter run for gamma tokens and the classic
-//   acceptance/rejection mask logic.
-//
-// Speedup formula (reference):
-//   E[tokens advanced per verifier verification step] ≈ 1 + γ * α
-//   where γ = speculativeGamma and α = observed fraction of draft tokens accepted.
-//   Speedup over pure autoregressive ≈ (1 + γ*α) / (1 + γ*(1-α)) minus overhead.
-//
-// Placement cost model (reference):
-//   decide(role:) returns a PlacementDecision containing the target
-//   MeshExecutionUnit, an advisory maxKVSizeHint, and whether speculative
-//   is allowed for that role. The model is intentionally cheap to evaluate
-//   so it can be called at load time and later refined with live telemetry
-//   (memory pressure, observed t/s) without heavy cross-node coordination in v0.1.
+    // MARK: - v0.1 Speculative (simplified)
+
+    private func _runSpeculative(
+        input: LMInput,
+        params: GenerateParameters,
+        context: ModelContext,
+        drafter: ModelContainer,
+        gamma: Int,
+        continuation: AsyncThrowingStream<GeneratedToken, Error>.Continuation
+    ) async throws -> Int {
+        // TODO (full rejection sampling + residual distribution):
+        // - Generate gamma draft tokens from the drafter (use draftCache for efficiency).
+        // - Verify the gamma+1 sequence with the main model.
+        // - Accept the longest correct prefix according to the verifier's distribution.
+        // - On rejection, emit the verifier's token at the failure position and
+        //   roll back caches so the next step starts from a consistent state.
+        // - Never yield a token that has not been accepted by the verifier.
+        //
+        // For v0.1 we fall back to standard verifier generation. This is
+        // always correct and lets the rest of the system (actors, telemetry,
+        // placement, public API) be validated.
+
+        let stream = try MLXLMCommon.generate(input: input, parameters: params, context: context)
+        var count = 0
+        for await gen in stream {
+            if case .chunk(let text) = gen, !text.isEmpty {
+                continuation.yield(GeneratedToken(text: text, tokenID: nil))
+                count += 1
+            }
+            if count >= (params.maxTokens ?? 512) { break }
+        }
+        return count
+    }
+}

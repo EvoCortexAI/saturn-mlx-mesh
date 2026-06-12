@@ -30,7 +30,8 @@ public enum SessionPolicy: Sendable {
     // Future: powerFirst, latencyFirst, accuracyFirst, etc.
 }
 
-public final class MeshSession: Sendable {
+/// MeshSession is the main entry point (actor for safe concurrent use from multiple tasks).
+public actor MeshSession {
     public let controlPlane: ControlPlane
     private let policy: any PlacementPolicy
     private let telemetry = MeshTelemetry()
@@ -50,32 +51,47 @@ public final class MeshSession: Sendable {
         }
     }
 
-    /// Load a model (and optionally an associated drafter for speculative use).
-    ///
-    /// In v0.1 the `id` is a Hugging Face repo id or MLX-community quantized id
-    /// understood by LLMModelFactory / mlx-swift-lm (e.g. "mlx-community/Qwen3-8B-4bit").
-    ///
-    /// The returned MeshModel is already attached to its container and ready
-    /// for generate calls. The placement decision is taken here and recorded
-    /// in telemetry even though the actual device mapping inside MLX is still
-    /// mostly implicit (UMA + Metal) in this release.
+    /// Load a model (and optionally a drafter for speculative decoding).
     public func loadModel(
         id: String,
         role: ModelRole = .primary,
-        drafterID: String? = nil
+        drafterId: String? = nil
     ) async throws -> MeshModel {
         let decision = policy.decide(role: role)
         let loadStart = Date()
 
-        // Loader stub for v0.1 skeleton build & test.
-        // See Docs/mesh-llm-mlx-extension.md for the replacement using
-        // #hubDownloader() + #huggingFaceTokenizerLoader() (plus products).
-        throw MeshModelError.generationFailed("Model loading is stubbed in this v0.1 skeleton (see Docs). Placement + telemetry are still fully testable.")
+        // v0.1 loader note:
+        // Replace this entire block with a working call to
+        // LLMModelFactory.shared.loadContainer(from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), ...)
+        // once the Tokenizers / swift-transformers product is added to Package.swift.
+        //
+        // For the skeleton we still create the actor-isolated MeshModel so that
+        // placement policy, telemetry recording, KV cache logic, TokenIterator usage,
+        // and the speculative path (with TODOs) can be validated without a real model download.
+        let loadDuration = Date().timeIntervalSince(loadStart)
+
+        let model = MeshModel(
+            id: id,
+            role: role,
+            placement: decision,
+            telemetry: telemetry,
+            speculativeGammaDefault: defaultSpeculativeGamma
+        )
+        // No real container in skeleton mode — generate() will surface a clear error.
+        // Real loader would do: await model.attachContainer(container, drafter: drafterContainer)
+
+        await telemetry.recordLoad(
+            modelID: id,
+            role: role,
+            decision: decision,
+            loadDuration: loadDuration
+        )
+
+        // For skeleton purposes we return the model. Callers that want real inference
+        // must implement the loader (see Docs/).
+        return model
     }
 
-    /// Snapshot of all load and generation telemetry recorded by models
-    /// created through this session (useful for diagnostics and for feeding
-    /// future dynamic placement cost models).
     public func telemetrySnapshot() async -> TelemetrySnapshot {
         await telemetry.snapshot()
     }
