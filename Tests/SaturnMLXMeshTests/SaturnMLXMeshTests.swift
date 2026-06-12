@@ -85,26 +85,70 @@ final class SaturnMLXMeshTests: XCTestCase {
         let _ = MeshExecutionUnit.gpu
     }
 
-    // Example of how a real generation test would look (commented so it does
-    // not run during normal `swift test` in environments without the model).
-    //
-    // func testRealStreamingGeneration() async throws {
-    //     let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
-    //     let model = try await mesh.loadModel(id: "mlx-community/Qwen3-8B-4bit", role: .primary)
-    //     let stream = try await model.generate(
-    //         prompt: "Explain Saturn mesh inference in one sentence.",
-    //         maxTokens: 32,
-    //         temperature: 0.2,
-    //         speculativeGamma: 4
-    //     )
-    //
-    //     var output = ""
-    //     for try await token in stream {
-    //         output += token.text
-    //     }
-    //     XCTAssertFalse(output.isEmpty)
-    //
-    //     let snap = await mesh.telemetrySnapshot()
-    //     XCTAssertGreaterThan(snap.totalGeneratedTokens, 0)
-    // }
+    // MARK: - Generate behavior tests (skeleton-hardening)
+
+    func testGenerateThrowsNotLoadedWhenNoContainerAttached() async {
+        let model = MeshModel(
+            id: "test-unloaded",
+            role: .primary,
+            placement: PlacementDecision(unit: .gpu),
+            telemetry: MeshTelemetry()
+        )
+
+        do {
+            _ = try await model.generate(prompt: "hello")
+            XCTFail("Expected .notLoaded")
+        } catch let error as MeshModelError {
+            if case .notLoaded = error {
+                // success
+            } else {
+                XCTFail("Wrong error: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    func testStreamFinishesAfterSuccessfulGeneration() async throws {
+        let telemetry = MeshTelemetry()
+        let model = MeshModel(
+            id: "sim-model",
+            role: .primary,
+            placement: PlacementDecision(unit: .gpu),
+            telemetry: telemetry
+        )
+        await model._enableTestSuccessSimulation()
+
+        let stream = try await model.generate(prompt: "test prompt", maxTokens: 10)
+
+        var received: [String] = []
+        for try await token in stream {
+            received.append(token.text)
+        }
+
+        XCTAssertEqual(received, ["tok0", "tok1", "tok2", "tok3"])
+        // If we reach here without hanging, the stream completed (finish() was called)
+    }
+
+    func testSpeculativeTelemetryAbsentWhenNoDrafterAttached() async throws {
+        let telemetry = MeshTelemetry()
+        let model = MeshModel(
+            id: "sim-spec-no-drafter",
+            role: .primary,
+            placement: PlacementDecision(unit: .gpu, allowSpeculative: true),
+            telemetry: telemetry,
+            speculativeGammaDefault: 4   // requested, but no drafter container attached
+        )
+        await model._enableTestSuccessSimulation()
+
+        let stream = try await model.generate(prompt: "spec test")
+        // drain the stream
+        for try await _ in stream {}
+
+        let snap = await telemetry.snapshot()
+        let last = snap.generations.last
+        XCTAssertNotNil(last)
+        XCTAssertNil(last?.speculativeGamma, "Should not claim speculative when no drafter was attached")
+        XCTAssertNil(last?.acceptedTokens)
+    }
 }

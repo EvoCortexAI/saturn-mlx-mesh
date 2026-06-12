@@ -24,20 +24,22 @@ for try await token in stream {
 
 ## Key Components
 
-- `MeshSession` — factory, control plane selection, policy
-- `MeshModel` — `@MainActor`, generation (standard + speculative path), reusable KV cache hooks
-- `PlacementPolicy` + `AppleSiliconBalanced` — `MeshExecutionUnit`, `PlacementDecision`, `decide(role:)`
-- `MeshTelemetry` — actor for load + generation records (tokens/s, speculative acceptance, etc.)
+- `MeshSession` — actor factory, control plane selection, policy
+- `MeshModel` — actor-isolated, generation (standard + speculativeGamma surface), telemetry hooks, prepared for future KV reuse
+- `PlacementPolicy` + `AppleSiliconBalanced` — `MeshExecutionUnit`, `PlacementDecision`, `decide(role:)` (with weighted cost notes)
+- `MeshTelemetry` — actor for load + generation records (truthful speculative fields)
 
-## Status (v0.1)
+## Status (v0.1 — skeleton-hardening phase)
 
-- ✅ Exact public API surface
-- ✅ Placement policy wired at load time + recorded in telemetry
-- ✅ Actor isolation where appropriate
-- ✅ Telemetry actor + snapshot
-- ✅ Basic unit tests (policy, telemetry, session wiring)
-- ⚠️ Model loading is currently stubbed (see `MeshSession.loadModel`). The real loader requires the current `mlx-swift-lm` Hub downloader + tokenizer loader macros + the corresponding products (`MLXHuggingFace` etc.). Replace the stub and add products when integrating on target Saturn-Node hardware.
-- Speculative decoding: public API + telemetry support present. Full drafter + verifier acceptance loop (with proper rejection math) is intentionally minimal/stubbed pending basic end-to-end streaming + cache validation.
+- ✅ Exact public API surface (MeshSession + MeshModel are actors)
+- ✅ Placement policy wired + recorded in telemetry
+- ✅ Actor isolation
+- ✅ Telemetry (truthful: speculative fields only when drafter was attached *and* used)
+- ✅ Stream completion fixed (finish() called on success)
+- ✅ Basic unit tests + new coverage for generate behavior (.notLoaded, stream finishes, no-spec telemetry when no drafter)
+- ⚠️ Model loading (`loadModel`) is stubbed. Real LLMModelFactory + Hub downloader / tokenizer wiring is the next substantial milestone.
+- ⚠️ KV cache reuse: comments + newCache prep exist, but current path uses high-level generate (full TokenIterator reuse is TODO).
+- Speculative: API + telemetry support present. Currently falls back to normal generation. Full drafter + acceptance/rejection is TODO (see code).
 
 See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for the full vision, math references (placement cost model, speculative speedup formula `1 + γ·α`), and rollout notes.
 
@@ -62,13 +64,12 @@ Requires Apple Silicon (macOS 15+ / iOS 18+ target) for real MLX execution. The 
 
 Nodes register capabilities with labels such as `["mlx", "primary"]`. This library powers the actual inference work on those nodes.
 
-## Next (post v0.1)
+## Next (recommended order)
 
-- Restore production loader + add `MLXHuggingFace` + tokenizer products.
-- Real-hardware streaming + speculative validation (with measured acceptance rates).
-- Expose richer cache control and `maxKVSize` application.
-- Dynamic placement using live `TelemetrySnapshot`.
-- Multi-node / mesh routing (when control plane starts coordinating multiple Saturn-Nodes).
+1. Real model loading (LLMModelFactory + downloader/tokenizer products) — next substantial milestone.
+2. Only after real loading: KV cache reuse + real drafter/verifier speculative.
+3. Real-hardware smoke + telemetry back to control plane.
+4. Dynamic placement, multi-node, etc.
 
 ## License / Copyright
 

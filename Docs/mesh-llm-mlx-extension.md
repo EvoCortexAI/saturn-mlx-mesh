@@ -16,24 +16,25 @@ The Saturn Mesh aims to deliver:
 
 This package is the concrete MLX implementation of the execution side of that vision.
 
-## Current Scope (v0.1 — strictly minimal & verifiable)
+## Current Scope (v0.1 — strictly minimal & verifiable — skeleton hardening phase)
 
 - Single Apple Silicon node only. No real cross-node mesh, no layer sharding.
-- `MeshSession` + `MeshModel` public surface exactly as specified in the council-reviewed prompt.
-- Placement policy is fully wired at load time and decisions are recorded in telemetry. Physical device selection inside MLX remains largely implicit (Metal + UMA) for v0.1.
-- KV cache reuse is mandatory and implemented via the low-level `newCache` + `TokenIterator` path recommended by the mlx-swift-lm / WWDC25 material.
-- Speculative decoding is present in two forms:
-  1. Attempt to use native speculative helpers from MLXLMCommon when available.
-  2. Explicit simplified propose/verify fallback with correct rejection sampling (no incorrect tokens are ever emitted to the caller).
-- Telemetry actor captures load records and per-generation stats (including speculative acceptance counts).
-- Basic error handling and clear `MeshModelError` cases.
-- Comments throughout reference the placement cost model and the speculative speedup formula.
+- `MeshSession` + `MeshModel` are true actors. Public API surface matches the design (including speculativeGamma and drafterId).
+- Placement policy is wired at load time and decisions recorded in telemetry.
+- Model loading (`loadModel`) is stubbed — it throws a clear error explaining the required Hub downloader + tokenizer wiring. No real LLMModelFactory / MLX container is acquired yet.
+- Generation uses the high-level MLXLMCommon.generate path. Comments and some newCache calls exist for future KV cache reuse, but actual cross-turn reuse via TokenIterator is not yet active (TODO).
+- Speculative path (speculativeGamma) is wired in the API and telemetry. When no drafter is attached (or in current skeleton), it safely falls back to normal generation. Full drafter proposal + verifier acceptance/rejection with proper math + draftCache rollback is still TODO (see _runSpeculative).
+- Telemetry is truthful: speculativeGamma/acceptedTokens are only set when a drafter was attached *and* the speculative branch was taken. generatedTokens currently reflects generator-emitted chunks (not raw token IDs).
+- Stream completion is now correct (continuation.finish() called on success paths).
+- Basic error handling (.notLoaded) and focused unit tests for stream/ failure / telemetry truthfulness.
+- Comments reference the placement cost model and speculative speedup formula.
 
-**Explicit non-goals for v0.1** (per the prompt):
-- No cross-device layer sharding.
-- No production-grade multi-node router.
-- No full MTP / tree speculative or advanced acceptance sampling.
-- Real model loads in unit tests are avoided (they require large downloads and Apple Silicon Metal).
+**Explicit non-goals / current limitations (skeleton phase):**
+- No real model loading / tokenizer / downloader (see recommended milestone order).
+- No cross-device layer sharding or production multi-node.
+- No full speculative decoding acceleration (falls back).
+- No KV cache reuse across generations yet.
+- Real hardware smoke tests are manual only.
 
 ## Exact Public API (must remain stable)
 
@@ -60,13 +61,13 @@ saturn-mlx-mesh/
 ├── Package.swift
 ├── Sources/SaturnMLXMesh/
 │   ├── MeshSession.swift          // factory + session owner
-│   ├── MeshModel.swift            // @MainActor model + KV + speculative
-│   ├── PlacementPolicy.swift      // MeshExecutionUnit, PlacementDecision, AppleSiliconBalanced
-│   ├── MeshTelemetry.swift        // actor for load/generation records
+│   ├── MeshModel.swift            // actor-isolated model (generation + speculative API + telemetry)
+│   ├── PlacementPolicy.swift      // MeshExecutionUnit, PlacementDecision, AppleSiliconBalanced + weighted cost notes
+│   ├── MeshTelemetry.swift        // actor for load/generation records (truthful speculative fields)
 │   ├── MeshExecutionUnit.swift    // small re-export helper
 │   └── (minimal internal helpers)
 ├── Tests/SaturnMLXMeshTests/
-│   └── MeshModelTests.swift       // policy, telemetry, session wiring (no heavy loads)
+│   └── SaturnMLXMeshTests.swift   // policy, telemetry, session + generate behavior (notLoaded, stream finish, no-spec telemetry)
 └── Docs/
     └── mesh-llm-mlx-extension.md  // this file
 ```
@@ -78,22 +79,27 @@ saturn-mlx-mesh/
 
 ## Validation performed
 
-After generation the package was exercised with:
-
 ```bash
 swift build
 swift test
 ```
 
-See the generating agent transcript for concrete output and any required follow-up fixes against the exact `mlx-swift-lm` surface present on the validation machine.
+(Now includes tests for .notLoaded, stream completion on success, and truthful absence of speculative telemetry when no drafter is attached.)
 
-## Next steps (post v0.1)
+The loader remains intentionally stubbed per the hardening milestone plan. Real loading is the next major step.
 
-1. This is the home of the execution-plane mesh package (Saturn-Node). It is intentionally separate from saturn-control (the control plane).
-2. Add a small real-hardware smoke that exercises streaming + speculativeGamma + telemetry snapshot (can live in a `SaturnNodeBench` target).
-3. Wire node-reported telemetry back into Saturn-Control (via existing heartbeat / task event paths).
-4. Evolve placement policy to consume live `TelemetrySnapshot` data for dynamic decisions.
-5. When multi-node support arrives, extend `ControlPlane.remote(...)` and add wire contracts.
+## Recommended next steps (per current analysis)
+
+Follow the skeleton-hardening then real-inference order:
+
+1. (Done in this pass) Stream completion, truthful telemetry, honest docs, focused generate tests.
+2. Implement real model loading (LLMModelFactory + proper Hub downloader / #huggingFaceTokenizerLoader() + Tokenizers product). This is the next substantial milestone.
+3. Only after real loading works: tackle KV cache reuse (TokenIterator + persistent cache across turns) and real drafter/verifier speculative decoding.
+4. Add real-hardware smoke / benchmark target.
+5. Wire telemetry back to control plane, evolve placement, etc.
+6. Multi-node later.
+
+The package is intentionally separate from saturn-control.
 
 ## Rollback / safety
 

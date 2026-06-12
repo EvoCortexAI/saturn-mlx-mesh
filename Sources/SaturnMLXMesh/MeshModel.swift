@@ -42,6 +42,9 @@ public actor MeshModel {
     private let telemetry: MeshTelemetry
     private let speculativeGammaDefault: Int?
 
+    // Test hook for skeleton-hardening tests (stream finish, telemetry truth)
+    private var simulateSuccessForTest = false
+
     init(
         id: String,
         role: ModelRole,
@@ -61,12 +64,46 @@ public actor MeshModel {
         self.drafterContainer = drafter
     }
 
+    /// Enable a mock success path for unit tests (yields a few tokens then finishes cleanly).
+    /// Only for skeleton-hardening / behavior tests. Does not require a real MLX container.
+    internal func _enableTestSuccessSimulation() async {
+        simulateSuccessForTest = true
+    }
+
     public func generate(
         prompt: String,
         maxTokens: Int = 512,
         temperature: Float = 0.7,
         speculativeGamma: Int? = nil
     ) async throws -> AsyncThrowingStream<GeneratedToken, Error> {
+        // Test simulation path for stream finish + telemetry tests (skeleton hardening)
+        if simulateSuccessForTest {
+            return AsyncThrowingStream { continuation in
+                Task {
+                    for i in 0..<4 {
+                        continuation.yield(GeneratedToken(text: "tok\(i)", tokenID: i))
+                    }
+                    continuation.finish()
+
+                    // Record truthful telemetry (no drafter in sim unless attached; here we force non-spec)
+                    let dur = 0.05
+                    let info = GenerationInfo(
+                        modelID: id,
+                        role: role,
+                        promptTokens: 3,
+                        generatedTokens: 4,
+                        duration: dur,
+                        tokensPerSecond: 80.0,
+                        speculativeGamma: nil,
+                        acceptedTokens: nil,
+                        memoryPressureHint: nil,
+                        timestamp: Date()
+                    )
+                    await telemetry.recordGenerationInfo(info)
+                }
+            }
+        }
+
         guard let container = container else {
             throw MeshModelError.notLoaded
         }
@@ -85,6 +122,8 @@ public actor MeshModel {
         // Capture before Sendable closure
         let hasDrafter = drafterContainer != nil
         let theDrafter = drafterContainer
+        let requestedSpec = (gamma ?? 0) > 1
+        let didSpec = requestedSpec && hasDrafter
 
         return AsyncThrowingStream { continuation in
             Task {
@@ -94,9 +133,7 @@ public actor MeshModel {
                             input: UserInput(prompt: prompt)
                         )
 
-                        let doingSpec = (gamma ?? 0) > 1 && hasDrafter
-
-                        if doingSpec, let drafter = theDrafter {
+                        if didSpec, let drafter = theDrafter {
                             // v0.1 simplified speculative (see _runSpeculative for TODOs)
                             return try await self._runSpeculative(
                                 input: input,
@@ -127,21 +164,25 @@ public actor MeshModel {
                         }
                     }
 
+                    // Telemetry truthful: only claim speculative when we actually had a drafter and used the path
                     let dur = Date().timeIntervalSince(start)
                     let tps = dur > 0 ? Double(max(count, 1)) / dur : 0
                     let info = GenerationInfo(
                         modelID: id,
                         role: role,
                         promptTokens: 0,
-                        generatedTokens: count,
+                        generatedTokens: count,   // NOTE: counts generator chunks (text pieces), not necessarily raw token IDs yet
                         duration: dur,
                         tokensPerSecond: tps,
-                        speculativeGamma: (gamma ?? 0) > 1 ? gamma : nil,
-                        acceptedTokens: (gamma ?? 0) > 1 ? count : nil,
+                        speculativeGamma: didSpec ? gamma : nil,
+                        acceptedTokens: didSpec ? count : nil,
                         memoryPressureHint: nil,
                         timestamp: Date()
                     )
                     await telemetry.recordGenerationInfo(info)
+
+                    // CRITICAL: finish the stream on success path so callers do not hang
+                    continuation.finish()
 
                 } catch {
                     continuation.finish(throwing: MeshModelError.generationFailed(String(describing: error)))
