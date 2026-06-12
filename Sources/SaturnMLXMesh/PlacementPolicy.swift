@@ -328,22 +328,37 @@ public struct MeshComputationGraph: Sendable, Equatable {
     /// Convenience: construct a minimal L7 speculative subgraph (drafter propose + verifier).
     /// Used for tests and to illustrate how speculative becomes an explicit subgraph
     /// that a future executor (PlanMaster-style gather + merge) can place across units.
-    public static func l7SpeculativeExample(primaryID: String, drafterID: String) -> MeshComputationGraph {
+    /// The edge weight represents the propose/verify roundtrip (low latency, good bandwidth for v0.1 single-node).
+    public static func l7SpeculativeExample(primaryID: String, drafterID: String, primaryUnit: MeshExecutionUnit = .gpu, drafterUnit: MeshExecutionUnit = .unified) -> MeshComputationGraph {
         var g = MeshComputationGraph()
         let dev = Device(id: "local", kind: "AppleSilicon")
         g.ensureDevice(dev)
-        let primaryUnit = SiliconExecutionUnit(device: dev, unit: .gpu)
-        let drafterUnit = SiliconExecutionUnit(device: dev, unit: .unified)
-        g.addSiliconUnit(primaryUnit)
-        g.addSiliconUnit(drafterUnit)
+        let pUnit = SiliconExecutionUnit(device: dev, unit: primaryUnit)
+        let dUnit = SiliconExecutionUnit(device: dev, unit: drafterUnit)
+        g.addSiliconUnit(pUnit)
+        g.addSiliconUnit(dUnit)
         let p = ModelComponent(id: primaryID, kind: "primary")
         let d = ModelComponent(id: drafterID, kind: "drafter")
-        g.addComponent(p, on: primaryUnit)
-        g.addComponent(d, on: drafterUnit)
+        g.addComponent(p, on: pUnit)
+        g.addComponent(d, on: dUnit)
         g.active = [p.id, d.id]
         // Speculative edge: drafter proposals flow to verifier (accept/reject at prefix)
         g.edges.append(GraphEdge(from: d.id, to: p.id, weight: EdgeWeight(latency: 0.05, bandwidth: 200.0, serialization: 0.0)))
         return g
+    }
+
+    /// Attach the drafter side of an L7 speculative subgraph (drafter -> primary propose/verify edge).
+    /// Called from loadModel when a drafterId is supplied for a primary load, or when loading
+    /// a drafter model. This makes the L7 structure explicit and first-class in the live graph
+    /// (pluggable for future Runtime DAG executor).
+    public mutating func addL7SpeculativeDrafter(drafterID: String, on drafterUnit: SiliconExecutionUnit, forPrimary primaryID: String) {
+        addSiliconUnit(drafterUnit)
+        let dComp = ModelComponent(id: drafterID, kind: "drafter")
+        addComponent(dComp, on: drafterUnit)
+        // Propose/verify edge weight (from the L7 vision: fast drafter proposals to verifier)
+        let edgeW = EdgeWeight(latency: 0.05, bandwidth: 200.0, serialization: 0.0)
+        addEdge(GraphEdge(from: dComp.id, to: primaryID, weight: edgeW))
+        activate(dComp.id)
     }
 
     public func nodeWeight(for key: String) -> NodeWeight? {
@@ -450,8 +465,23 @@ public struct PlacementEngine: Sendable {
             let resOnUnit = g.episodeResidencies.values.filter { $0 == key }.count
             let residencyPenalty = Double(resOnUnit) * 0.8
 
-            let cost = (basePolicy as? AppleSiliconBalanced)?.placementCost(for: role, unit: unit, maxKVSizeHint: base.maxKVSizeHint)
+            var cost = (basePolicy as? AppleSiliconBalanced)?.placementCost(for: role, unit: unit, maxKVSizeHint: base.maxKVSizeHint)
                 ?? (w.compute + w.memory + w.power + w.latency + residencyPenalty)
+
+            // L7 speculative subgraph awareness (from the explicit edges added at load time with drafterId):
+            // If the graph contains L7 propose/verify edges (low latency, high bandwidth), give a cost
+            // bonus (lower cost) to units with low latency weight. This surfaces the L7 subgraph in
+            // engine decisions -- good for placing drafters on fast propose units (PlanMaster-style
+            // subgraph scheduling, Phoenix isolation for parallel propose/verify).
+            if role == .drafter {
+                let hasL7Edge = g.edges.contains { e in
+                    e.weight.latency < 0.1 && e.weight.bandwidth > 100
+                }
+                if hasL7Edge {
+                    let latencyBonus = w.latency * 0.15
+                    cost -= latencyBonus
+                }
+            }
 
             if cost < bestCost {
                 bestCost = cost

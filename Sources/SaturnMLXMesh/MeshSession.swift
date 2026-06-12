@@ -105,15 +105,13 @@ public actor MeshSession {
             computationGraph.activate(comp.id)
 
             if let drafterId {
-                // Add drafter component + L7 speculative propose/verify edge (even on same device for v0.1).
-                let dUnit = SiliconExecutionUnit(device: localDevice, unit: .unified)
-                computationGraph.addSiliconUnit(dUnit)
-                let dComp = ModelComponent(id: drafterId, kind: "drafter")
-                computationGraph.addComponent(dComp, on: dUnit)
-                computationGraph.addEdge(
-                    GraphEdge(from: dComp.id, to: comp.id, weight: EdgeWeight(latency: 0.05, bandwidth: 200.0, serialization: 0.0))
-                )
-                computationGraph.activate(dComp.id)
+                // Decide placement for the drafter using the engine (now with the primary in the graph,
+                // so L7 subgraph awareness in decide can influence the unit choice for the drafter).
+                // Then attach the L7 speculative subgraph explicitly (drafter propose/verify edge to primary).
+                // This makes the L7 structure first-class in the live graph (pluggable for future executor).
+                let drafterDecision = placementEngine.decide(role: .drafter, graph: computationGraph)
+                let dUnit = SiliconExecutionUnit(device: localDevice, unit: drafterDecision.unit)
+                computationGraph.addL7SpeculativeDrafter(drafterID: drafterId, on: dUnit, forPrimary: id)
             }
         }
 
