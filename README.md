@@ -4,7 +4,7 @@
 
 Part of [EvoIntelligenceFabric](https://evocortex.ai) — the execution plane (Saturn-Node).
 
-v0.1 — initial, verification-first, single-node implementation.
+The package is built toward the vision of **Saturn Mesh as a weighted directed computation graph** (not a neural network graph or network topology). This graph simultaneously describes models, layers, experts, devices, execution units (CPU/GPU/ANE under UMA), memory, and communication, with node weights w(v)=(compute, memory, power, latency) and edge weights w(e)=(latency, bandwidth, serialization). The scheduler optimizes min ∑w(v) + ∑w(e) subject to quality constraints. See the full vision in CHANGELOG.md.
 
 ## Public API (exact contract)
 
@@ -25,23 +25,28 @@ for try await token in stream {
 ## Key Components
 
 - `MeshSession` — actor factory, control plane selection, policy
-- `MeshModel` — actor-isolated, generation (standard + speculativeGamma surface), telemetry hooks, prepared for future KV reuse
-- `PlacementPolicy` + `AppleSiliconBalanced` — `MeshExecutionUnit`, `PlacementDecision`, `decide(role:)` (with weighted cost notes)
+- `MeshModel` — actor-isolated, generation (standard + speculativeGamma surface with real drafter usage), KV cache reuse via `TokenIterator` + `KVCacheBox`, telemetry hooks
+- `PlacementPolicy` + `AppleSiliconBalanced` — `MeshExecutionUnit`, `PlacementDecision`, `decide(role:)` with explicit `NodeWeight`/`EdgeWeight` cost model (w(v) + w(e))
 - `MeshTelemetry` — actor for load + generation records (truthful speculative fields)
+- Graph foundation types (`Device`, `SiliconExecutionUnit`, `NodeWeight`, `EdgeWeight`, `ModelComponent`) modeling the multi-level computation graph (Device/Silicon/Model/Placement/MoE/Mesh/Speculative/Runtime DAG/Weighted/Full)
 
-## Status (v0.1 — skeleton-hardening phase)
+## Status (progressing toward full weighted computation graph)
 
 - ✅ Exact public API surface (MeshSession + MeshModel are actors)
-- ✅ Placement policy wired + recorded in telemetry
-- ✅ Actor isolation
-- ✅ Telemetry (truthful: speculative fields only when drafter was attached *and* used)
-- ✅ Stream completion fixed (finish() called on success)
-- ✅ Basic unit tests + new coverage for generate behavior (.notLoaded, stream finishes, no-spec telemetry when no drafter)
-- ⚠️ Model loading (`loadModel`) is stubbed. Real LLMModelFactory + Hub downloader / tokenizer wiring is the next substantial milestone.
-- ⚠️ KV cache reuse: comments + newCache prep exist, but current path uses high-level generate (full TokenIterator reuse is TODO).
-- Speculative: API + telemetry support present. Currently falls back to normal generation. Full drafter + acceptance/rejection is TODO (see code).
+- ✅ Real model loading wired via `LLMModelFactory` + Hub downloader/tokenizer loader macros (with required `HuggingFace`/`Tokenizers` products)
+- ✅ KV cache reuse implemented for main generation path (explicit `TokenIterator` + persistent cache via `KVCacheBox`)
+- ✅ Drafter loading: speculative path actually executes the attached drafter `ModelContainer` for proposals
+- ✅ Graph foundation types + explicit weighted cost model in placement (`NodeWeight` w(v), `EdgeWeight` w(e), cost-driven `placementCost`)
+- ✅ Placement policy wired + recorded in telemetry; decisions now report formal graph costs
+- ✅ Actor isolation throughout
+- ✅ Telemetry (truthful: speculative fields only when drafter attached *and* used)
+- ✅ Stream completion fixed (`continuation.finish()` on success)
+- ✅ Basic unit tests + coverage for generate behavior (.notLoaded, stream finishes, no-spec telemetry)
+- ✅ Opt-in hardware smoke executable (`SaturnMLXMeshSmoke`) for real inference (excluded from `swift test`)
+- Simulation hook (`_enableTestSuccessSimulation()`) preserved so unit tests/CI require no model weights or GPU
+- See [CHANGELOG.md](CHANGELOG.md) for the full adopted graph vision (10 levels: Device Graph → Full Saturn Graph) and detailed milestone history.
 
-See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for the full vision, math references (placement cost model, speculative speedup formula `1 + γ·α`), and rollout notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full adopted Saturn Mesh graph vision (the 10-level weighted directed computation graph) and detailed history. See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for additional rollout notes and math references (placement cost model, speculative speedup formula).
 
 ## Build & Test
 
@@ -54,7 +59,9 @@ Requires Apple Silicon (macOS 15+ / iOS 18+ target) for real MLX execution. The 
 
 ## Dependencies
 
-- `mlx-swift-lm` (MLXLLM + MLXLMCommon)
+- `mlx-swift-lm` (MLXLLM + MLXLMCommon + MLXHuggingFace)
+- `swift-huggingface` (HuggingFace module for downloader)
+- `swift-transformers` (Tokenizers for tokenizer loader)
 
 ## Relationship to the Rest of Saturn
 
@@ -64,12 +71,13 @@ Requires Apple Silicon (macOS 15+ / iOS 18+ target) for real MLX execution. The 
 
 Nodes register capabilities with labels such as `["mlx", "primary"]`. This library powers the actual inference work on those nodes.
 
-## Next (recommended order)
+## Next (aligned with the graph vision)
 
-1. Real model loading (LLMModelFactory + downloader/tokenizer products) — next substantial milestone.
-2. Only after real loading: KV cache reuse + real drafter/verifier speculative.
-3. Real-hardware smoke + telemetry back to control plane.
-4. Dynamic placement, multi-node, etc.
+- Full verifier/drafter speculative acceptance (propose gamma from drafter + verify/accept/reject with main model + cache rollback).
+- Cross-device support (Device Graph, Mesh Expert Graph) and remote `ControlPlane`.
+- Runtime DAG representation and basic scheduler that optimizes min ∑w(v) + ∑w(e) over the full weighted graph.
+- Real-hardware validation, telemetry back to control plane, dynamic placement using live costs.
+- Expand to MoE routing as graph traversal, more complex Runtime DAGs (router/embedder/vision/reranker), and multi-device execution units.
 
 ## License / Copyright
 
