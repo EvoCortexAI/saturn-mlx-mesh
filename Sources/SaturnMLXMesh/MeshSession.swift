@@ -217,15 +217,28 @@ public actor MeshSession {
         speculativeGamma: Int? = nil
     ) async throws -> AsyncThrowingStream<GeneratedToken, Error> {
         let (context, _kv) = await retrieveContextWithKV(for: prompt)
-        let augmented = context + prompt
-        // _kv (EpisodeKVCache?) + kvCacheManager.getRealCache(_kv?.episodeID) available
-        // for future model.generate priming (TokenIterator can start from prefilled episode cache).
-        let stream = try await model.generate(
-            prompt: augmented,
-            maxTokens: maxTokens,
-            temperature: temperature,
-            speculativeGamma: speculativeGamma
-        )
+
+        let stream: AsyncThrowingStream<GeneratedToken, Error>
+        if let kv = _kv, let pre = await kvCacheManager.getPrefilledCache(for: kv.episodeID) {
+            // Prime with the prefilled episode KV cache: pass only the new 'prompt' (the query),
+            // the prefilled cache provides the state for the retrieved context prefix.
+            // This closes the v0.3 Epi KV priming hook (avoids re-prefill of long context).
+            stream = try await model.generate(
+                prompt: prompt,
+                maxTokens: maxTokens,
+                temperature: temperature,
+                speculativeGamma: speculativeGamma,
+                prefilledCache: pre
+            )
+        } else {
+            let augmented = context + prompt
+            stream = try await model.generate(
+                prompt: augmented,
+                maxTokens: maxTokens,
+                temperature: temperature,
+                speculativeGamma: speculativeGamma
+            )
+        }
 
         // Phase 3: after a generation that produced telemetry, let the engine rewrite the graph
         // (incorporates tps / memory pressure + current residencies into live w(v)).

@@ -41,6 +41,14 @@ public struct EpisodeKVCache: Sendable, Equatable {
     }
 }
 
+/// @unchecked Sendable wrapper for a prefilled [any KVCache] obtained from the manager.
+/// Allows "donating" a real KV cache array across actor boundaries (e.g. Session -> Model)
+/// for use inside a ModelContainer.perform closure (priming a TokenIterator for an episode prefix).
+/// The inner array is not Sendable; the wrapper is the bridge (same pattern as KVCacheBox).
+public struct PrefilledKVCache: @unchecked Sendable {
+    public let cache: [any KVCache]
+}
+
 /// Actor that owns episode-specific KV caches (real MLX [any KVCache] via boxes) and
 /// coordinates with EpisodicMemoryIndex + the session's MeshComputationGraph (residency).
 ///
@@ -138,6 +146,15 @@ public actor KVCacheManager {
     /// Returns nil if no real prefilled cache was donated yet for this episode.
     internal func getRealCache(for episodeID: UUID) -> [any KVCache]? {
         cacheBoxes[episodeID]?.cache
+    }
+
+    /// Returns a wrapped prefilled cache for priming (Sendable holder so it can be passed
+    /// from Session to Model.generate for use inside perform / TokenIterator).
+    internal func getPrefilledCache(for episodeID: UUID) -> PrefilledKVCache? {
+        if let c = cacheBoxes[episodeID]?.cache {
+            return PrefilledKVCache(cache: c)
+        }
+        return nil
     }
 
     /// Donate / store a freshly prefilled cache (called from MeshModel after block-prefill

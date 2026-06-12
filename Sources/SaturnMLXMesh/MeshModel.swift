@@ -83,7 +83,8 @@ public actor MeshModel {
         prompt: String,
         maxTokens: Int = 512,
         temperature: Float = 0.7,
-        speculativeGamma: Int? = nil
+        speculativeGamma: Int? = nil,
+        prefilledCache: PrefilledKVCache? = nil   // for Epi KV priming from retrieveContextWithKV + getPrefilledCache
     ) async throws -> AsyncThrowingStream<GeneratedToken, Error> {
         // Test simulation path for stream finish + telemetry tests (skeleton hardening)
         if simulateSuccessForTest {
@@ -158,26 +159,32 @@ public actor MeshModel {
                             // The cache lives in kvCacheBox (see class above) so it is
                             // reused on the next call to generate() on this model.
                             //
-                            // v0.3 Epi KV: if an episode prefix cache is available (from
-                            // session.kvCacheManager.getRealCache(episodeID) after buildEpisodeCache
-                            // + donation of a prefilled box from a block-prefill forward), we can
-                            // use it as the base cache here (or combine) before running the new
-                            // prompt tokens. This avoids re-prefilling the long retrieved context.
-                            // For now the conversation cache is separate; priming is stubbed for
-                            // future integration with generateWithMemory + retrieveContextWithKV.
-                            if self.kvCacheBox.cache == nil {
-                                var cacheParams = params
-                                if let hint = self.placement.maxKVSizeHint {
-                                    cacheParams.maxKVSize = hint
+                            // v0.3 Epi KV: if a prefilled episode cache is provided (from
+                            // Session via retrieveContextWithKV + manager.getPrefilledCache after
+                            // a buildEpisodeCache + donation), use it as the starting cache for
+                            // the TokenIterator. The 'prompt' arg in this case is the new query
+                            // only (not the full augmented text); the prefilled cache already
+                            // holds the state for the retrieved context prefix. This avoids
+                            // re-prefilling long retrieved episodes.
+                            // The main conversation kvCacheBox remains for non-primed turns.
+                            let cacheToUse: [any KVCache]
+                            if let pre = prefilledCache?.cache {
+                                cacheToUse = pre
+                            } else {
+                                if self.kvCacheBox.cache == nil {
+                                    var cacheParams = params
+                                    if let hint = self.placement.maxKVSizeHint {
+                                        cacheParams.maxKVSize = hint
+                                    }
+                                    self.kvCacheBox.cache = context.model.newCache(parameters: cacheParams)
                                 }
-                                self.kvCacheBox.cache = context.model.newCache(parameters: cacheParams)
+                                cacheToUse = self.kvCacheBox.cache!
                             }
-                            let cache = self.kvCacheBox.cache!
 
                             let tokenIterator = try TokenIterator(
                                 input: input,
                                 model: context.model,
-                                cache: cache,
+                                cache: cacheToUse,
                                 parameters: params
                             )
 
