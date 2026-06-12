@@ -151,4 +151,30 @@ final class SaturnMLXMeshTests: XCTestCase {
         XCTAssertNil(last?.speculativeGamma, "Should not claim speculative when no drafter was attached")
         XCTAssertNil(last?.acceptedTokens)
     }
+
+    func testEpisodicMemoryIndexBasic() async throws {
+        let index = EpisodicMemoryIndex(numEpisodes: 3, windowSize: 2)
+
+        let turns: [ConversationTurn] = [
+            .init(role: "user", content: "What is the capital of France?"),
+            .init(role: "assistant", content: "Paris is the capital of France."),
+            .init(role: "user", content: "Tell me about the Eiffel Tower."),
+            .init(role: "assistant", content: "The Eiffel Tower is in Paris."),
+            .init(role: "user", content: "What is the weather in Tokyo?"),
+            .init(role: "assistant", content: "I don't have real-time weather, but Tokyo is usually mild.")
+        ]
+
+        await index.ingest(turns: turns)
+
+        let all = await index.episodes()
+        XCTAssertGreaterThanOrEqual(all.count, 1)
+
+        let match = await index.match(query: "capital of France")
+        XCTAssertNotNil(match)
+        if let m = match {
+            XCTAssertGreaterThan(m.score, 0.1)
+            let hasFrance = m.episode.turns.contains { $0.content.contains("France") }
+            XCTAssertTrue(hasFrance)
+        }
+    }
 }

@@ -12,6 +12,13 @@ Keep active work in `Unreleased`, then promote to a dated release section when c
   - `Device`, `SiliconExecutionUnit` (Level 1–2)
   - `NodeWeight` (w(v) = (compute, memory, power, latency)) and `EdgeWeight` (w(e) = (latency, bandwidth, serialization)) (Level 9)
   - `ModelComponent` for layers, experts, embeddings, routers, etc. (Levels 3–5)
+- Start EpiCache-inspired episodic memory for long conversational context (v0.2 text-level):
+  - Added `EpisodicMemoryIndex` actor: utterance-window segmentation, simple trigram embedding, K-means clustering, cosine retrieval of relevant episodes.
+  - Added `KVCacheManager` actor skeleton (build/retrieve/update per-episode caches; will tie to real MLX KV in v0.3).
+  - Added `LayerBudgetAllocator` for future sensitivity-aware per-layer KV budgets (sharpness α ≈ 2–4 recommended).
+  - Wired `EpisodicMemoryIndex` into `MeshSession` (ingest + `retrieveContext` + `generateWithMemory` that augments prompts with retrieved episode text).
+  - Added basic test exercising ingest + match.
+  - This enables hybrid RAG (durable facts) + episodic KV (fast conversational state) without full-history prefill. See the EpiCache-inspired design notes in the vision section below.
 - Adopt the full Saturn Mesh graph vision as the guiding architecture (exact text):
 
   The graph for Saturn Mesh is best viewed as a weighted directed computation graph.

@@ -43,7 +43,9 @@ for try await token in stream {
 - ✅ Stream completion fixed (`continuation.finish()` on success)
 - ✅ Basic unit tests + coverage for generate behavior (.notLoaded, stream finishes, no-spec telemetry)
 - ✅ Opt-in hardware smoke executable (`SaturnMLXMeshSmoke`) for real inference (excluded from `swift test`)
+- ✅ v0.2 EpisodicMemoryIndex (text-level): utterance segmentation, embedding, K-means episodes, retrieval for long-context augmentation. Integrated into MeshSession.
 - Simulation hook (`_enableTestSuccessSimulation()`) preserved so unit tests/CI require no model weights or GPU
+- KVCacheManager and LayerBudgetAllocator skeletons added (real MLX KV compression + layer budgets in v0.3+)
 - See [CHANGELOG.md](CHANGELOG.md) for the full adopted graph vision (10 levels: Device Graph → Full Saturn Graph) and detailed milestone history.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full adopted Saturn Mesh graph vision (the 10-level weighted directed computation graph) and detailed history. See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for additional rollout notes and math references (placement cost model, speculative speedup formula).
@@ -71,13 +73,15 @@ Requires Apple Silicon (macOS 15+ / iOS 18+ target) for real MLX execution. The 
 
 Nodes register capabilities with labels such as `["mlx", "primary"]`. This library powers the actual inference work on those nodes.
 
-## Next (aligned with the graph vision)
+## Next (aligned with the graph vision + EpiCache memory)
 
-- Full verifier/drafter speculative acceptance (propose gamma from drafter + verify/accept/reject with main model + cache rollback).
+- v0.3: Real MLX KV cache hooks + block-wise prefill + per-episode `EpisodeKVCache` objects + KVCacheManager integration.
+- v0.4: Sensitivity-aware layer budget allocation (LayerBudgetAllocator) when building compressed episode caches.
+- Full verifier/drafter speculative acceptance (already partially wired; complete propose + verify path with cache rollback).
 - Cross-device support (Device Graph, Mesh Expert Graph) and remote `ControlPlane`.
-- Runtime DAG representation and basic scheduler that optimizes min ∑w(v) + ∑w(e) over the full weighted graph.
-- Real-hardware validation, telemetry back to control plane, dynamic placement using live costs.
-- Expand to MoE routing as graph traversal, more complex Runtime DAGs (router/embedder/vision/reranker), and multi-device execution units.
+- Runtime DAG representation (Router, Embedder, Vision, etc.) and basic `MeshKVCache` / scheduler that optimizes min ∑w(v) + ∑w(e).
+- Real-hardware validation + hybrid RAG + episodic KV memory in production flows.
+- Expand to full MeshKVCache abstraction: full session + episodic caches + layer policies + remote residency + refresh protocol.
 
 ## License / Copyright
 
