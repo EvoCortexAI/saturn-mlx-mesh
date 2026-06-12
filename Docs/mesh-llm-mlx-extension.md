@@ -135,12 +135,20 @@ Real inference, long-context memory, and hardware behavior are exercised via the
 
 ## Recommended next steps (aligned with graph vision + EpiCache)
 
-1. v0.3: Real MLX KV cache hooks, block-wise prefill compression, per-episode `EpisodeKVCache` objects, and full `KVCacheManager` integration.
-2. v0.4: Wire `LayerBudgetAllocator` for sensitivity-aware per-layer KV budgets when building compressed episode caches.
-3. Complete / harden full verifier/drafter speculative acceptance (propose + verify/accept/reject + rollback) and integrate with episodic memory.
-4. Cross-device Device Graph / Mesh Expert Graph support and remote `ControlPlane` execution.
-5. Runtime DAG modeling (Router, Embedder, Vision, Reranker as first-class `ModelComponent`s) + basic `MeshKVCache` / graph scheduler that optimizes min ∑w(v) + ∑w(e) using live telemetry.
-6. Real-hardware validation, hybrid RAG + episodic KV flows, and expansion of the smoke/benchmark targets.
+**Phase 2 (completed):** Real MLX KV cache hooks, block-wise prefill (via prefilled donation to KVCacheManager), per-episode `EpisodeKVCache` (with `LayerBudgetAllocator` for sensitivity-aware per-layer budgets using proportional + largest-remainder), full `KVCacheManager` integration, and graph residency tracking (`episodeResidencies` + `markEpisodeResidency` on `MeshComputationGraph`). This turns long-context memory into first-class weighted nodes/edges in the Saturn Mesh DAG (see elaboration below and CHANGELOG Phase 2 entry).
+
+1. Complete / harden full verifier/drafter speculative acceptance (propose + verify/accept/reject + rollback) and integrate with episodic + KV memory (L7 subgraph now has resident KV).
+2. Cross-device Device Graph / Mesh Expert Graph support and remote `ControlPlane` execution (L6; residency enables costed KV movement).
+3. Runtime DAG modeling (Router, Embedder, Vision, Reranker as first-class `ModelComponent`s) + basic `MeshKVCache` / graph scheduler that optimizes min ∑w(v) + ∑w(e) using live telemetry + residency (L8/L9/L10; Phase 3 target).
+4. Real-hardware validation, hybrid RAG + episodic KV flows, and expansion of the smoke/benchmark targets.
+
+**Elaboration on Phase 2 + vision (think harder):** With KVCacheManager + residency, EpiCache memory is no longer ad-hoc text RAG (v0.2) or isolated caches. Episodes become resident vertices in the computation graph (L1 Device → L2 Silicon UMA where KV lives cheaply, L6 experts/memory sharded across devices with transfer w(e), L9 w(v) now includes episodic memory pressure + layer budgets from allocator, L10 the full dynamic DAG where scheduler rewrites placement/active sets *including which episodes stay warm on which unit*). 
+
+The prefill-donate (build + storePrefilledCache) + prime (getRealCache into TokenIterator) is exactly a "side effect" (home-mixer/candidate-pipeline pattern) that mutates graph state post-execution. Retrieval (EpisodicMemoryIndex.match + KV) is a Phoenix two-tower source (user/episode history vs content; current trigram is toy) with isolation potential (candidates/episodes attend only to shared prompt, no crosstalk for parallel experts). A future MeshGraphExecutor (Grox PlanMaster gather/merge via withTaskGroup) can run independent subgraphs in parallel: "prefill/retrieve episode KV subgraph" || "drafter propose (L7)" || "main primary", then merge (acceptance + KV commit + weight update + residency mark). Thunder-like live state (recent episodes + telemetry) feeds dynamic w(v). This is how "that graph—not the transformer itself—is the real intellectual property."
+
+The allocator math (powered sensitivities / sum * total, then largest-remainder distribution) + existing placementCost (w(v) dot + role/KV penalties, UMA edges ~0) now combine for memory-inclusive decisions.
+
+See x-algorithm-main (candidate-pipeline traits for Sources/Hydrators/Filters/Scorers/Selectors/SideEffects; PlanMaster parallel exec + merge; Phoenix isolation mask + two-tower; Grox plans) for the production DAG patterns directly mappable here.
 
 The package is intentionally separate from saturn-control (execution plane only). The graph—not any single transformer—is the central abstraction.
 
