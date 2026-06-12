@@ -231,3 +231,129 @@ public struct GeneratedToken: Sendable, Equatable {
     public let text: String
     public let tokenID: Int?
 }
+
+// MARK: - Mesh Computation Graph (first-class weighted directed computation graph)
+//
+// This is the central abstraction for the Saturn Mesh vision (Levels 1-10).
+// Vertices represent devices (L1), silicon execution units under UMA (L2),
+// model components/layers/experts (L3-5), drafters (L7), routers/embedders etc (L8).
+// Edges carry tensor flow or speculative propose/verify (L7) or cross-device (L6).
+// Weights: w(v) = NodeWeight(c, m, p, t), w(e) = EdgeWeight(l, b, s).
+// Scheduler (future PlacementEngine) continuously rewrites placements/active sets
+// to minimize ∑w(v) + ∑w(e) subject to quality (L9/L10).
+//
+// "That graph—not the transformer itself—is the real intellectual property opportunity."
+//
+// Intra-device transfer edges have ~0 cost (Level 2 Apple UMA advantage).
+// Current implementation populates the graph at load time and supports live
+// cost feedback from telemetry (recordObservedCost). Full dynamic rewrite +
+// pluggable stage execution (inspired by candidate-pipeline Sources/Scorers/SideEffects
+// + Grox PlanMaster gather/merge) lands in subsequent slices of Phase 1+.
+
+/// Directed edge in the computation graph with cost (L9).
+public struct GraphEdge: Sendable, Equatable {
+    public let from: String
+    public let to: String
+    public let weight: EdgeWeight
+}
+
+/// First-class mutable (value) representation of the Saturn Mesh as a weighted
+/// directed computation graph. Owned by MeshSession; consulted by placement
+/// and updated from live GenerationInfo after runs.
+public struct MeshComputationGraph: Sendable, Equatable {
+    public private(set) var devices: [Device] = []
+    public private(set) var siliconUnits: [SiliconExecutionUnit] = []
+    public private(set) var components: [ModelComponent] = []
+    public private(set) var edges: [GraphEdge] = []
+    /// Live node weights (keyed by component.id or silicon key "device:unit").
+    public private(set) var nodeWeights: [String: NodeWeight] = [:]
+    public private(set) var active: Set<String> = []
+
+    public init() {}
+
+    public mutating func ensureDevice(_ device: Device) {
+        if !devices.contains(device) { devices.append(device) }
+    }
+
+    public mutating func addSiliconUnit(_ unit: SiliconExecutionUnit, initialWeight: NodeWeight? = nil) {
+        if !siliconUnits.contains(unit) {
+            siliconUnits.append(unit)
+        }
+        let key = siliconKey(for: unit)
+        if nodeWeights[key] == nil {
+            nodeWeights[key] = initialWeight ?? NodeWeight(compute: 1.0, memory: 1.0, power: 1.0, latency: 1.0)
+        }
+    }
+
+    public mutating func addComponent(_ component: ModelComponent, on unit: SiliconExecutionUnit?, initialWeight: NodeWeight? = nil) {
+        if !components.contains(component) {
+            components.append(component)
+        }
+        if let u = unit {
+            addSiliconUnit(u)
+            let e = GraphEdge(
+                from: component.id,
+                to: siliconKey(for: u),
+                weight: EdgeWeight(latency: 0.0, bandwidth: 0.0, serialization: 0.0) // UMA intra-device ~0
+            )
+            if !edges.contains(e) { edges.append(e) }
+        }
+        let key = component.id
+        if nodeWeights[key] == nil {
+            nodeWeights[key] = initialWeight ?? NodeWeight(compute: 2.0, memory: 2.0, power: 3.0, latency: 1.0)
+        }
+    }
+
+    private func siliconKey(for unit: SiliconExecutionUnit) -> String {
+        "\(unit.device.id):\(unit.unit)"
+    }
+
+    /// Blend live observed metrics (from telemetry) into the node's weight.
+    /// Higher tokensPerSecond => lower effective latency/compute.
+    /// This is the Level 9 live feedback that enables the scheduler to rewrite.
+    public mutating func recordObservedCost(for key: String, latency: Double, compute: Double, power: Double? = nil) {
+        guard var w = nodeWeights[key] else { return }
+        let alpha = 0.3 // blend factor; future policy can tune or use more stats
+        let newLatency = w.latency * (1 - alpha) + latency * alpha
+        let newCompute = w.compute * (1 - alpha) + compute * alpha
+        let newPower = power.map { w.power * (1 - alpha) + $0 * alpha } ?? w.power
+        nodeWeights[key] = NodeWeight(compute: newCompute, memory: w.memory, power: newPower, latency: newLatency)
+    }
+
+    /// Convenience: construct a minimal L7 speculative subgraph (drafter propose + verifier).
+    /// Used for tests and to illustrate how speculative becomes an explicit subgraph
+    /// that a future executor (PlanMaster-style gather + merge) can place across units.
+    public static func l7SpeculativeExample(primaryID: String, drafterID: String) -> MeshComputationGraph {
+        var g = MeshComputationGraph()
+        let dev = Device(id: "local", kind: "AppleSilicon")
+        g.ensureDevice(dev)
+        let primaryUnit = SiliconExecutionUnit(device: dev, unit: .gpu)
+        let drafterUnit = SiliconExecutionUnit(device: dev, unit: .unified)
+        g.addSiliconUnit(primaryUnit)
+        g.addSiliconUnit(drafterUnit)
+        let p = ModelComponent(id: primaryID, kind: "primary")
+        let d = ModelComponent(id: drafterID, kind: "drafter")
+        g.addComponent(p, on: primaryUnit)
+        g.addComponent(d, on: drafterUnit)
+        g.active = [p.id, d.id]
+        // Speculative edge: drafter proposals flow to verifier (accept/reject at prefix)
+        g.edges.append(GraphEdge(from: d.id, to: p.id, weight: EdgeWeight(latency: 0.05, bandwidth: 200.0, serialization: 0.0)))
+        return g
+    }
+
+    public func nodeWeight(for key: String) -> NodeWeight? {
+        nodeWeights[key]
+    }
+
+    // Mutation helpers so MeshSession (same module) can populate without exposing
+    // direct write access to public API consumers. Keeps the value type clean.
+    public mutating func activate(_ id: String) {
+        active.insert(id)
+    }
+
+    public mutating func addEdge(_ edge: GraphEdge) {
+        if !edges.contains(edge) {
+            edges.append(edge)
+        }
+    }
+}

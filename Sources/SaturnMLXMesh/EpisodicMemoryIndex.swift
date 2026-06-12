@@ -54,6 +54,12 @@ public struct EpisodeMatch: Sendable, Equatable {
 /// Training-free episodic memory index.
 /// Ingests turns, segments them, embeds, clusters, and allows retrieval.
 /// Actor-isolated for safe concurrent use from MeshSession / MeshModel.
+///
+/// Phase 1 note: this acts as a Retrieval Source (candidate-pipeline / Phoenix two-tower analog).
+/// Current trigram + K-means + cosine is the v0.2 text stand-in for episode retrieval.
+/// Future: real two-tower MLX embedders + isolation mask for parallel episode/expert scoring
+/// without crosstalk (see Phoenix candidate isolation). Results feed generateWithMemory
+/// and will become EpisodeKVCache priming + graph residency tracking (v0.3+).
 public actor EpisodicMemoryIndex {
     private var episodes: [ConversationEpisode] = []
     private let numEpisodes: Int

@@ -177,4 +177,53 @@ final class SaturnMLXMeshTests: XCTestCase {
             XCTAssertTrue(hasFrance)
         }
     }
+
+    // MARK: - Phase 1 graph as first-class (L1-10 + feedback)
+
+    func testMeshComputationGraphAndFeedback() async {
+        let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
+
+        // Use the test-only register (avoids real load/network in CI).
+        await mesh._registerModelForGraphTest(id: "test-primary-8b", role: .primary, unit: .gpu)
+        await mesh._registerModelForGraphTest(id: "test-drafter-1b", role: .drafter, unit: .unified)
+
+        var g = await mesh.currentComputationGraph()
+        XCTAssertGreaterThanOrEqual(g.components.count, 2)
+        XCTAssertTrue(g.siliconUnits.contains { $0.unit == .gpu })
+        XCTAssertTrue(g.siliconUnits.contains { $0.unit == .unified })
+        XCTAssertTrue(g.active.contains("test-primary-8b"))
+        XCTAssertTrue(g.components.contains { $0.id == "test-drafter-1b" })
+
+        // Note: the L7 speculative propose/verify edge (drafter -> primary) is added by the
+        // real loadModel(id:drafterId:) path. The register test helper keeps this unit test
+        // free of network; the static builder below + loadModel source prove the wiring.
+
+        // Also exercise the static L7 example builder (explicit subgraph for future executor)
+        let l7 = MeshComputationGraph.l7SpeculativeExample(primaryID: "p", drafterID: "d")
+        XCTAssertEqual(l7.active.count, 2)
+
+        // Simulate a high-throughput generation and feed back into weights (Level 9 live cost).
+        let fastGen = GenerationInfo(
+            modelID: "test-primary-8b",
+            role: .primary,
+            promptTokens: 10,
+            generatedTokens: 120,
+            duration: 0.8,
+            tokensPerSecond: 150.0,
+            speculativeGamma: nil,
+            acceptedTokens: nil,
+            memoryPressureHint: nil,
+            timestamp: Date()
+        )
+        await mesh.recordObservedCostFrom(info: fastGen, for: "test-primary-8b", unit: .gpu)
+
+        g = await mesh.currentComputationGraph()
+        // The silicon key or component weight should have been blended (lower latency proxy).
+        if let w = g.nodeWeight(for: "local:gpu") ?? g.nodeWeight(for: "test-primary-8b") {
+            // Original latency ~1.0; after high tps blend it should be noticeably smaller.
+            XCTAssertLessThan(w.latency, 0.9, "Observed high tps should have reduced effective latency weight")
+        } else {
+            XCTFail("Expected a node weight for the primary unit or component after feedback")
+        }
+    }
 }

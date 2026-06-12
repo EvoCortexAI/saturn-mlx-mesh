@@ -224,6 +224,11 @@ public actor MeshModel {
     // - The verifier's cache (kvCacheBox) is advanced only for accepted tokens
     //   + the correction (rejection sampling fallback).
     //
+    // In graph terms (Phase 1+): the drafter propose path is a Source (candidate-pipeline style),
+    // the zip prefix match + correction is a Selector, and the KV box update + telemetry record
+    // are SideEffects that mutate graph state / weights. A MeshGraphExecutor (PlanMaster gather/merge
+    // analog using withTaskGroup) will later run such stages for L7/L8 subgraphs in parallel.
+    //
     // Simplified for v0.1 but with correct rejection behavior and cache discipline.
     // Full parallel verification / acceptance probability math can be refined later.
 

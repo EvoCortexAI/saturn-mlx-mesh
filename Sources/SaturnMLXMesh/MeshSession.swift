@@ -45,6 +45,11 @@ public actor MeshSession {
     /// Ingest conversation turns to enable long-context retrieval without full history.
     public let episodicMemory: EpisodicMemoryIndex
 
+    /// Live first-class weighted directed computation graph for this session (Levels 1-10).
+    /// Populated during loadModel; updated via recordObservedCostFrom after generations
+    /// so that future PlacementEngine / scheduler can rewrite placements (min ∑w(v)+∑w(e)).
+    private var computationGraph = MeshComputationGraph()
+
     public init(
         controlPlane: ControlPlane = .local,
         policy: SessionPolicy = .appleSiliconBalanced,
@@ -69,6 +74,36 @@ public actor MeshSession {
     ) async throws -> MeshModel {
         let decision = policy.decide(role: role)
         let loadStart = Date()
+
+        // Populate the session's first-class MeshComputationGraph (Phase 1).
+        // This makes the multi-level vision (L1 Device, L2 Silicon+UMA~0, L4 Placement,
+        // L7 Speculative edges) explicit and queryable. The graph is the schedulable artifact.
+        do {
+            let localDevice = Device(id: "local", kind: "AppleSilicon")
+            let su = SiliconExecutionUnit(device: localDevice, unit: decision.unit)
+            computationGraph.ensureDevice(localDevice)
+            if let balanced = policy as? AppleSiliconBalanced {
+                computationGraph.addSiliconUnit(su, initialWeight: balanced.nodeWeight(for: decision.unit))
+            } else {
+                computationGraph.addSiliconUnit(su)
+            }
+            let compKind = (role == .primary) ? "primary" : (role == .drafter ? "drafter" : "secondary")
+            let comp = ModelComponent(id: id, kind: compKind)
+            computationGraph.addComponent(comp, on: su)
+            computationGraph.activate(comp.id)
+
+            if let drafterId {
+                // Add drafter component + L7 speculative propose/verify edge (even on same device for v0.1).
+                let dUnit = SiliconExecutionUnit(device: localDevice, unit: .unified)
+                computationGraph.addSiliconUnit(dUnit)
+                let dComp = ModelComponent(id: drafterId, kind: "drafter")
+                computationGraph.addComponent(dComp, on: dUnit)
+                computationGraph.addEdge(
+                    GraphEdge(from: dComp.id, to: comp.id, weight: EdgeWeight(latency: 0.05, bandwidth: 200.0, serialization: 0.0))
+                )
+                computationGraph.activate(dComp.id)
+            }
+        }
 
         // Real loader (wired in the narrow real-loading first pass).
         // Uses the exact macro form recommended by mlx-swift-lm and already
@@ -117,6 +152,12 @@ public actor MeshSession {
         await telemetry.snapshot()
     }
 
+    /// Returns a snapshot of the live computation graph (devices, silicon units,
+    /// components, edges, and current node weights after any observed cost feedback).
+    public func currentComputationGraph() async -> MeshComputationGraph {
+        computationGraph
+    }
+
     /// Ingest new conversation turns into the episodic memory index.
     /// Call this after each user/assistant exchange for long-context support.
     public func ingest(turns: [ConversationTurn]) async {
@@ -151,6 +192,35 @@ public actor MeshSession {
             temperature: temperature,
             speculativeGamma: speculativeGamma
         )
+    }
+
+    /// Test/simulation helper: populate the graph for a model handle without
+    /// triggering the real (network + weights) load path. Real loadModel always
+    /// populates automatically. This keeps unit tests fast while proving the
+    /// graph construction + feedback APIs.
+    internal func _registerModelForGraphTest(id: String, role: ModelRole, unit: MeshExecutionUnit) async {
+        let localDevice = Device(id: "local", kind: "AppleSilicon")
+        let su = SiliconExecutionUnit(device: localDevice, unit: unit)
+        computationGraph.ensureDevice(localDevice)
+        computationGraph.addSiliconUnit(su)
+        let compKind = (role == .primary) ? "primary" : (role == .drafter ? "drafter" : "secondary")
+        let comp = ModelComponent(id: id, kind: compKind)
+        computationGraph.addComponent(comp, on: su)
+        computationGraph.activate(comp.id)
+    }
+
+    /// Blend live generation telemetry into the graph's node weights for the
+    /// given model/unit. This is the Level 9 feedback mechanism that lets the
+    /// (future) scheduler rewrite placements and active subgraphs.
+    /// Called by tests today; in fuller runtime the session or a side-effect
+    /// stage would invoke it after each GenerationInfo is recorded.
+    internal func recordObservedCostFrom(info: GenerationInfo, for modelID: String, unit: MeshExecutionUnit) async {
+        let siliconKey = "local:\(unit)"
+        let tps = max(info.tokensPerSecond, 1.0)
+        let lat = max(0.001, 1.0 / tps)          // proxy: high throughput = low latency
+        let comp = max(0.5, 100.0 / tps)         // proxy for relative compute cost
+        computationGraph.recordObservedCost(for: siliconKey, latency: lat, compute: comp)
+        computationGraph.recordObservedCost(for: modelID, latency: lat, compute: comp)
     }
 }
 

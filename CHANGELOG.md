@@ -8,6 +8,7 @@ Keep active work in `Unreleased`, then promote to a dated release section when c
 
 ## [Unreleased]
 
+- Phase 1 (graph as first-class executable artifact): introduced `MeshComputationGraph` (L1-10) with `Device`/`SiliconExecutionUnit`/`ModelComponent` vertices, `GraphEdge` + `NodeWeight`/`EdgeWeight`, live `nodeWeights`, `active` set, `recordObservedCost` blending (from telemetry tps → lower latency/compute proxies), `l7SpeculativeExample` static builder, and internal `activate`/`addEdge` for population. `MeshSession` now owns + populates the graph in `loadModel` (and via `_registerModelForGraphTest` for CI), exposes `currentComputationGraph()`, and provides `recordObservedCostFrom` feedback. Added L7 Source/Selector/SideEffect + Phoenix-style retrieval comments in speculative/episodic paths (no logic change). New passing test `testMeshComputationGraphAndFeedback` (components, units, actives, L7 example, weight mutation after simulated fast gen). 8/8 tests green. This makes the "weighted directed computation graph" (the real IP) a concrete, queryable, updatable value — foundation for PlacementEngine rewrite, Runtime DAG executor (PlanMaster gather/merge + candidate-pipeline stages), and Epi KV residency in subsequent work.
 - Introduce foundational types for the Saturn Mesh as a weighted directed computation graph (per the multi-level vision):
   - `Device`, `SiliconExecutionUnit` (Level 1–2)
   - `NodeWeight` (w(v) = (compute, memory, power, latency)) and `EdgeWeight` (w(e) = (latency, bandwidth, serialization)) (Level 9)
