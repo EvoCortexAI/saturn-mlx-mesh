@@ -226,4 +226,86 @@ final class SaturnMLXMeshTests: XCTestCase {
             XCTFail("Expected a node weight for the primary unit or component after feedback")
         }
     }
+
+    // MARK: - Phase 2: EpiCache v0.3 real KV + LayerBudgetAllocator + graph residency
+
+    func testLayerBudgetAllocator() {
+        let allocator = LayerBudgetAllocator()
+        // 4 layers, total 100, sensitivities increasing (last layer most sensitive)
+        let budgets = allocator.allocate(totalBudget: 100, layerSensitivities: [1.0, 2.0, 3.0, 10.0], sharpness: 2.0)
+        XCTAssertEqual(budgets.count, 4)
+        XCTAssertEqual(budgets.reduce(0, +), 100, "Budgets must sum exactly to total")
+        // Higher sensitivity should get strictly more or equal (after remainder)
+        XCTAssertTrue(budgets[3] >= budgets[2], "Most sensitive layer should receive at least as much")
+    }
+
+    func testKVCacheManagerBasic() async {
+        let index = EpisodicMemoryIndex()
+        let manager = KVCacheManager(index: index)
+
+        let episode = ConversationEpisode(
+            id: UUID(),
+            turns: [ConversationTurn(role: "user", content: "Hello long context test.")],
+            embedding: Array(repeating: 0.1, count: 128)
+        )
+
+        let budget = KVCacheBudget(maxTokens: 2048)
+        // Use sensitivities to exercise allocator inside build
+        let sensitivities = [1.0, 1.5, 2.0, 4.0]
+        let meta = await manager.buildEpisodeCache(
+            episode: episode,
+            budget: budget,
+            layerSensitivities: sensitivities
+        )
+
+        XCTAssertEqual(meta.episodeID, episode.id)
+        XCTAssertNotNil(meta.layerBudgets)
+        XCTAssertEqual(meta.layerBudgets?.count, 4)
+        XCTAssertEqual(meta.budget.maxTokens, 2048)
+
+        let retrieved = await manager.retrieveCache(for: EpisodeMatch(episode: episode, score: 0.9))
+        XCTAssertNotNil(retrieved)
+        XCTAssertEqual(retrieved?.layerBudgets, meta.layerBudgets)
+
+        // Real cache path (sim donation) - use Sendable hasRealCache to avoid non-Sendable return across actor boundary in test
+        let has1 = await manager.hasRealCache(for: episode.id)
+        XCTAssertFalse(has1)
+        await manager.storePrefilledCache(for: episode.id, cache: []) // empty sim cache
+        let has2 = await manager.hasRealCache(for: episode.id)
+        XCTAssertTrue(has2)
+
+        let all = await manager.allCaches()
+        XCTAssertEqual(all.count, 1)
+
+        await manager.clear()
+        let afterClear = await manager.allCaches()
+        XCTAssertTrue(afterClear.isEmpty)
+    }
+
+    func testSessionKVAndGraphResidency() async {
+        let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
+
+        let episode = ConversationEpisode(
+            id: UUID(),
+            turns: [
+                .init(role: "user", content: "What is the Saturn mesh graph?"),
+                .init(role: "assistant", content: "It is a weighted directed computation graph...")
+            ],
+            embedding: Array(repeating: 0.2, count: 128)
+        )
+
+        // Use the Phase 2 test helper (builds via manager + LayerBudget + marks graph)
+        let kv = await mesh._buildAndRegisterEpisodeKVForTest(episode: episode, budget: KVCacheBudget(maxTokens: 1024))
+
+        XCTAssertEqual(kv.episodeID, episode.id)
+        XCTAssertNotNil(kv.layerBudgets)
+
+        // Manager has it
+        let retrieved = await mesh.kvCacheManager.retrieveCache(for: EpisodeMatch(episode: episode, score: 0.8))
+        XCTAssertNotNil(retrieved)
+
+        // Graph has residency marked
+        let g = await mesh.currentComputationGraph()
+        XCTAssertEqual(g.episodeResidencies[kv.episodeID], "local:gpu")
+    }
 }

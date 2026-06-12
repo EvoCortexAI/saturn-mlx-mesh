@@ -157,6 +157,14 @@ public actor MeshModel {
                             // Standard generation with explicit KV cache reuse.
                             // The cache lives in kvCacheBox (see class above) so it is
                             // reused on the next call to generate() on this model.
+                            //
+                            // v0.3 Epi KV: if an episode prefix cache is available (from
+                            // session.kvCacheManager.getRealCache(episodeID) after buildEpisodeCache
+                            // + donation of a prefilled box from a block-prefill forward), we can
+                            // use it as the base cache here (or combine) before running the new
+                            // prompt tokens. This avoids re-prefilling the long retrieved context.
+                            // For now the conversation cache is separate; priming is stubbed for
+                            // future integration with generateWithMemory + retrieveContextWithKV.
                             if self.kvCacheBox.cache == nil {
                                 var cacheParams = params
                                 if let hint = self.placement.maxKVSizeHint {

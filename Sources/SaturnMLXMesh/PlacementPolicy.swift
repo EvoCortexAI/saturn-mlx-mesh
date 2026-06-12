@@ -269,6 +269,11 @@ public struct MeshComputationGraph: Sendable, Equatable {
     public private(set) var nodeWeights: [String: NodeWeight] = [:]
     public private(set) var active: Set<String> = []
 
+    /// Per-episode KV cache residencies for memory-aware scheduling (ties EpiCache to graph nodes).
+    /// Key: episode.id (UUID), Value: silicon key e.g. "local:gpu". Updated on build/update in KVCacheManager flows.
+    /// Supports Level 6/10 residency tracking + future cross-device KV movement.
+    public private(set) var episodeResidencies: [UUID: String] = [:]
+
     public init() {}
 
     public mutating func ensureDevice(_ device: Device) {
@@ -355,5 +360,11 @@ public struct MeshComputationGraph: Sendable, Equatable {
         if !edges.contains(edge) {
             edges.append(edge)
         }
+    }
+
+    /// Mark (or update) that a given episode's KV cache is resident on a particular silicon unit.
+    /// Called by KVCacheManager / Session after build or update. Enables residency-aware placement.
+    public mutating func markEpisodeResidency(episodeID: UUID, on siliconKey: String) {
+        episodeResidencies[episodeID] = siliconKey
     }
 }

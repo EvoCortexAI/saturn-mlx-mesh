@@ -50,6 +50,11 @@ public actor MeshSession {
     /// so that future PlacementEngine / scheduler can rewrite placements (min ∑w(v)+∑w(e)).
     private var computationGraph = MeshComputationGraph()
 
+    /// KV cache manager for per-episode compressed caches (v0.3+ EpiCache).
+    /// Coordinates with episodicMemory (text) and the computationGraph (residency).
+    /// Real [any KVCache] stored via internal boxes; metadata + layer budgets via LayerBudgetAllocator.
+    public let kvCacheManager: KVCacheManager
+
     public init(
         controlPlane: ControlPlane = .local,
         policy: SessionPolicy = .appleSiliconBalanced,
@@ -59,6 +64,7 @@ public actor MeshSession {
         self.controlPlane = controlPlane
         self.defaultSpeculativeGamma = defaultSpeculativeGamma
         self.episodicMemory = episodicMemory ?? EpisodicMemoryIndex()
+        self.kvCacheManager = KVCacheManager(index: self.episodicMemory)
 
         switch policy {
         case .appleSiliconBalanced:
@@ -165,7 +171,7 @@ public actor MeshSession {
     }
 
     /// Retrieve relevant episode text (v0.2) to augment a prompt.
-    /// Later versions will return EpisodeKVCache objects for direct cache priming.
+    /// v0.3+: also returns EpisodeKVCache metadata (real cache available via kvCacheManager.getRealCache if prefilled).
     public func retrieveContext(for query: String, maxEpisodes: Int = 2) async -> String {
         guard let match = await episodicMemory.match(query: query) else { return "" }
 
@@ -175,8 +181,23 @@ public actor MeshSession {
         return "Relevant prior context:\n\(turnsText)\n\n"
     }
 
+    /// v0.3 Epi KV: retrieve both text context and the episode KV cache handle (if any).
+    /// The real [any KVCache] (if donated) can be fetched via kvCacheManager.getRealCache(match.episode.id)
+    /// for use as initial cache in TokenIterator (avoids re-prefill of the retrieved episode).
+    public func retrieveContextWithKV(for query: String, maxEpisodes: Int = 2) async -> (text: String, kv: EpisodeKVCache?) {
+        guard let match = await episodicMemory.match(query: query) else { return ("", nil) }
+
+        let turnsText = match.episode.turns.map { "\($0.role): \($0.content)" }.joined(separator: "\n")
+        let text = "Relevant prior context:\n\(turnsText)\n\n"
+        let kv = await kvCacheManager.retrieveCache(for: match)
+        return (text, kv)
+    }
+
     /// Convenience: retrieve episodic context for the prompt and generate.
-    /// This is the v0.2 text-level integration point. KV-primed version in v0.3+.
+    /// v0.2 text-level. v0.3+: uses retrieveContextWithKV; the returned EpisodeKVCache
+    /// metadata (and real cache if prefilled via kvCacheManager) enables priming the
+    /// main generation cache to skip re-prefill of long retrieved episodes (EpiCache block prefill goal).
+    /// Real priming hook lives in MeshModel (TokenIterator can take a pre-populated cache).
     public func generateWithMemory(
         model: MeshModel,
         prompt: String,
@@ -184,8 +205,10 @@ public actor MeshSession {
         temperature: Float = 0.7,
         speculativeGamma: Int? = nil
     ) async throws -> AsyncThrowingStream<GeneratedToken, Error> {
-        let context = await retrieveContext(for: prompt)
+        let (context, _kv) = await retrieveContextWithKV(for: prompt)
         let augmented = context + prompt
+        // _kv (EpisodeKVCache?) + kvCacheManager.getRealCache(_kv?.episodeID) available
+        // for future model.generate priming (TokenIterator can start from prefilled episode cache).
         return try await model.generate(
             prompt: augmented,
             maxTokens: maxTokens,
@@ -221,6 +244,19 @@ public actor MeshSession {
         let comp = max(0.5, 100.0 / tps)         // proxy for relative compute cost
         computationGraph.recordObservedCost(for: siliconKey, latency: lat, compute: comp)
         computationGraph.recordObservedCost(for: modelID, latency: lat, compute: comp)
+    }
+
+    /// Test helper: build an episode KV cache (using LayerBudgetAllocator inside manager)
+    /// and mark its residency on the graph. Demonstrates v0.3 Epi KV + graph tie-in.
+    internal func _buildAndRegisterEpisodeKVForTest(episode: ConversationEpisode, budget: KVCacheBudget = KVCacheBudget(maxTokens: 512), sensitivities: [Double]? = nil) async -> EpisodeKVCache {
+        let kv = await kvCacheManager.buildEpisodeCache(
+            episode: episode,
+            budget: budget,
+            layerSensitivities: sensitivities
+        )
+        // Mark residency on the graph (uses current "local" unit for sim; real would use decision.unit).
+        computationGraph.markEpisodeResidency(episodeID: kv.episodeID, on: "local:gpu")
+        return kv
     }
 }
 

@@ -9,6 +9,14 @@ Keep active work in `Unreleased`, then promote to a dated release section when c
 ## [Unreleased]
 
 - Phase 1 (graph as first-class executable artifact): introduced `MeshComputationGraph` (L1-10) with `Device`/`SiliconExecutionUnit`/`ModelComponent` vertices, `GraphEdge` + `NodeWeight`/`EdgeWeight`, live `nodeWeights`, `active` set, `recordObservedCost` blending (from telemetry tps → lower latency/compute proxies), `l7SpeculativeExample` static builder, and internal `activate`/`addEdge` for population. `MeshSession` now owns + populates the graph in `loadModel` (and via `_registerModelForGraphTest` for CI), exposes `currentComputationGraph()`, and provides `recordObservedCostFrom` feedback. Added L7 Source/Selector/SideEffect + Phoenix-style retrieval comments in speculative/episodic paths (no logic change). New passing test `testMeshComputationGraphAndFeedback` (components, units, actives, L7 example, weight mutation after simulated fast gen). 8/8 tests green. This makes the "weighted directed computation graph" (the real IP) a concrete, queryable, updatable value — foundation for PlacementEngine rewrite, Runtime DAG executor (PlanMaster gather/merge + candidate-pipeline stages), and Epi KV residency in subsequent work.
+- Phase 2 (EpiCache v0.3 real KV + LayerBudgetAllocator + graph residency): 
+  - Completed `KVCacheManager` actor (v0.3): `EpisodeKVCache` metadata with `layerBudgets`/`approxTokens`, internal `@unchecked Sendable` `KVCacheBox` for real `[any KVCache]`, `buildEpisodeCache` (supports prefilled donation + LayerBudgetAllocator for sensitivity-aware per-layer allocation using proportional + largest-remainder), `retrieveCache`, `getRealCache`/`storePrefilledCache` (for priming TokenIterator), `update`, `allCaches`, `clear`, `hasRealCache` (Sendable-safe). 
+  - `LayerBudgetAllocator` wired (sharpness α=2.5 default, EpiCache-inspired).
+  - `MeshSession` now exposes `public let kvCacheManager`, `retrieveContextWithKV`, `_buildAndRegisterEpisodeKVForTest` (build + graph.markEpisodeResidency).
+  - Enhanced `generateWithMemory` + comments for future KV priming; added residency tracking to `MeshComputationGraph` + mark helper.
+  - Model path comment for combining episode prefix cache with conversation KVBox.
+  - New tests: `testLayerBudgetAllocator` (math + sum), `testKVCacheManagerBasic` (allocator, build/retrieve/store, clear), `testSessionKVAndGraphResidency` (end-to-end + graph mark). Total 11/11 green.
+  - Preserves v0.2 text path + all prior behavior / public API / sim hook.
 - Introduce foundational types for the Saturn Mesh as a weighted directed computation graph (per the multi-level vision):
   - `Device`, `SiliconExecutionUnit` (Level 1–2)
   - `NodeWeight` (w(v) = (compute, memory, power, latency)) and `EdgeWeight` (w(e) = (latency, bandwidth, serialization)) (Level 9)
