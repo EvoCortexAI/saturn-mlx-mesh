@@ -320,7 +320,7 @@ public struct MeshComputationGraph: Sendable, Equatable {
     /// Higher tokensPerSecond => lower effective latency/compute.
     /// This is the Level 9 live feedback that enables the scheduler to rewrite.
     public mutating func recordObservedCost(for key: String, latency: Double, compute: Double, power: Double? = nil) {
-        guard var w = nodeWeights[key] else { return }
+        guard let w = nodeWeights[key] else { return }
         let alpha = 0.3 // blend factor; future policy can tune or use more stats
         let newLatency = w.latency * (1 - alpha) + latency * alpha
         let newCompute = w.compute * (1 - alpha) + compute * alpha
@@ -388,7 +388,7 @@ public struct MeshComputationGraph: Sendable, Equatable {
 
     /// Helper for schedulers/engines to blend live costs into a node's weight (L9).
     public mutating func blendWeight(for key: String, latencyFactor: Double = 1.0, memoryFactor: Double = 1.0) {
-        guard var w = nodeWeights[key] else { return }
+        guard let w = nodeWeights[key] else { return }
         nodeWeights[key] = NodeWeight(
             compute: w.compute,
             memory: w.memory * memoryFactor,
@@ -549,10 +549,21 @@ public struct PlacementEngine: Sendable {
 
         // Global residency pressure adjustment (affects units that are currently hosting episodes).
         if graph.episodeResidencies.count > 1 && lastPressure > 0.4 {
-            for (epID, unitKey) in graph.episodeResidencies {
-                if let _ = graph.nodeWeights[unitKey] {
+            for unitKey in graph.episodeResidencies.values {
+                if graph.nodeWeights[unitKey] != nil {
                     graph.blendWeight(for: unitKey, latencyFactor: 1.0, memoryFactor: 1.05)
                 }
+            }
+        }
+
+        // L9: also propagate any generation records whose modelID matches a known stage id.
+        // This lets Phase 8+ executor runs (which emit GenerationInfo with stage ids via the telemetry hook)
+        // and future real stages update their own w(v) through the normal rewrite path.
+        // Only touches keys that already exist as stages (additive, no impact on unit/model paths).
+        for gen in snapshot.generations.suffix(8) {
+            if graph.stages.contains(where: { $0.id == gen.modelID }) {
+                let latFactor = gen.tokensPerSecond > 60 ? 0.93 : 1.0
+                graph.blendWeight(for: gen.modelID, latencyFactor: latFactor, memoryFactor: 1.0)
             }
         }
     }
@@ -584,6 +595,14 @@ public struct PlacementEngine: Sendable {
         let d = decide(role: role, graph: graph)
         let cost = currentPlacementCost(for: role, unit: d.unit, graph: graph)
         return "role=\(role) -> unit=\(d.unit) cost=\(String(format: "%.2f", cost)) note=\(d.notes ?? "")"
+    }
+
+    /// L9 metadata helper: current estimated cost (sum of w(v) components) for a specific stage.
+    /// Purely additive; does not affect any existing model-role decide/rewrite paths or numbers.
+    public func currentStageCost(for stageID: String, kind: RuntimeStageKind, graph: MeshComputationGraph) -> Double {
+        let w = graph.stageWeight(for: stageID, kind: kind)
+        // residency on the stage's preferred silicon (if any) can be consulted by caller; here we just return the base w(v)
+        return w.compute + w.memory + w.power + w.latency
     }
 }
 
@@ -617,12 +636,45 @@ public struct MeshStage: Sendable, Equatable, Hashable {
 }
 
 extension MeshComputationGraph {
-    /// Add a stage (as first-class L8 component on the graph).
-    public mutating func addStage(_ stage: MeshStage) {
-        if !stages.contains(stage) { stages.append(stage) }
+    /// Default NodeWeight for a RuntimeStageKind (L9 cost-weighted metadata).
+    /// These provide sensible starting w(v) for stages when not supplied explicitly.
+    /// Drafters / embedders are cheap+fast; primary/verifier are heavier; epi sources carry memory pressure.
+    /// Used by addStage and the new estimated cost helpers. UMA local execution keeps transfer ~0.
+    public func defaultStageWeight(for kind: RuntimeStageKind) -> NodeWeight {
+        switch kind {
+        case .drafterProposer, .embedder:
+            return NodeWeight(compute: 0.6, memory: 0.8, power: 0.7, latency: 0.4)
+        case .epiKVSource:
+            // Retrieval + prefill is memory-sensitive (ties to LayerBudgetAllocator + residency)
+            return NodeWeight(compute: 1.2, memory: 3.5, power: 1.0, latency: 0.8)
+        case .router:
+            return NodeWeight(compute: 0.9, memory: 1.0, power: 0.8, latency: 0.5)
+        case .vision, .reranker:
+            return NodeWeight(compute: 1.5, memory: 1.8, power: 1.2, latency: 1.1)
+        case .primaryLLM:
+            return NodeWeight(compute: 2.5, memory: 2.5, power: 2.0, latency: 1.6)
+        }
     }
 
-    /// Attach a DAG edge between stages (or stage <-> component). Reuses GraphEdge for now.
+    /// Add a stage as first-class L8/L9 component on the graph, with optional initial w(v).
+    /// If no weight supplied, a kind-appropriate default is used (see defaultStageWeight).
+    /// The stage id becomes a key in nodeWeights so L9 cost queries and live feedback can target it.
+    public mutating func addStage(_ stage: MeshStage, initialWeight: NodeWeight? = nil) {
+        if !stages.contains(stage) { stages.append(stage) }
+        let w = initialWeight ?? defaultStageWeight(for: stage.kind)
+        if nodeWeights[stage.id] == nil {
+            nodeWeights[stage.id] = w
+        }
+    }
+
+    /// Backward-compatible overload (existing call sites continue to work).
+    public mutating func addStage(_ stage: MeshStage) {
+        addStage(stage, initialWeight: nil)
+    }
+
+    /// Attach a DAG edge between stages (or stage <-> component). The weight (w(e)) is first-class L9 metadata.
+    /// For local single-node (UMA) merges the serialization and transfer components are ~0.
+    /// Callers (including describeParallelSubgraph) should pass realistic weights for propose/verify or cross-stage tensor.
     public mutating func addStageEdge(from: String, to: String, weight: EdgeWeight? = nil) {
         let w = weight ?? EdgeWeight(latency: 0, bandwidth: 0, serialization: 0)
         let edge = GraphEdge(from: from, to: to, weight: w)
@@ -630,35 +682,154 @@ extension MeshComputationGraph {
     }
 
     /// Describe a small L8 parallel subgraph (e.g. EpiKVSource || DrafterProposer → merge).
-    /// For the toy in executor sketch. Returns the participating stage IDs.
+    /// Now also initializes stage weights (L9) using kind defaults and uses a realistic local edge weight
+    /// (low latency, high bandwidth, zero serialization thanks to UMA). This makes the modeling graph
+    /// carry proper cost-weighted metadata for subsequent estimated-cost queries and feedback.
     public mutating func describeParallelSubgraph(sources: [MeshStage], merge: MeshStage) -> [String] {
         addStage(merge)
         var ids: [String] = [merge.id]
+        // Local UMA parallel-to-merge edge: cheap communication (L2 + L9)
+        let localMergeEdge = EdgeWeight(latency: 0.005, bandwidth: 2000.0, serialization: 0.0)
         for s in sources {
             addStage(s)
-            addStageEdge(from: s.id, to: merge.id)
+            addStageEdge(from: s.id, to: merge.id, weight: localMergeEdge)
             ids.append(s.id)
         }
         return ids
     }
+
+    /// Lookup a stage's current NodeWeight (L9 metadata). Falls back to kind default if not yet observed.
+    public func stageWeight(for stageID: String, kind: RuntimeStageKind? = nil) -> NodeWeight {
+        if let w = nodeWeights[stageID] { return w }
+        if let k = kind { return defaultStageWeight(for: k) }
+        return NodeWeight(compute: 1.0, memory: 1.5, power: 1.0, latency: 1.0) // neutral fallback
+    }
+
+    /// Estimated cost of a parallel subgraph / RuntimeDAG using current L9 metadata (w(v) + w(e)).
+    /// This is the actionable "query the cost-weighted graph metadata" primitive.
+    /// Sums (compute+memory+power+latency) for the listed stages (using observed or kind-default weights)
+    /// plus the latency+serialization components of any matching edges in the graph.
+    /// Residency pressure and UMA ~0 are already reflected in the stored weights / edge defaults.
+    /// Pure and cheap — intended for future scheduler decisions and for tests to assert metadata behavior.
+    public func estimatedParallelSubgraphCost(sources: [any RuntimeStage], merge: (any RuntimeStage)? = nil) -> Double {
+        var total: Double = 0
+
+        func addWeight(for stage: any RuntimeStage) {
+            let w = stageWeight(for: stage.id, kind: stage.kind)
+            total += w.compute + w.memory + w.power + w.latency
+        }
+
+        for s in sources { addWeight(for: s) }
+        if let m = merge { addWeight(for: m) }
+
+        // Add edge costs (only latency + serialization contribute to the scalar "cost" here;
+        // bandwidth is a capacity dimension, not additive cost in this model).
+        if let m = merge {
+            for s in sources {
+                if let e = edges.first(where: { $0.from == s.id && $0.to == m.id }) {
+                    total += e.weight.latency + e.weight.serialization
+                }
+            }
+        } else if sources.count > 1 {
+            // If no explicit merge, sum any edges among the sources (rare for the demo case)
+            for i in 0..<sources.count {
+                for j in (i+1)..<sources.count {
+                    let a = sources[i].id, b = sources[j].id
+                    if let e = edges.first(where: { ($0.from == a && $0.to == b) || ($0.from == b && $0.to == a) }) {
+                        total += e.weight.latency + e.weight.serialization
+                    }
+                }
+            }
+        }
+
+        return total
+    }
+
+    /// Convenience overload for a full RuntimeDAG (uses its mergeStageID if present).
+    public func estimatedCost(of dag: RuntimeDAG) -> Double {
+        let mergeStage = dag.mergeStageID.flatMap { mid in
+            dag.stages.first { $0.id == mid }
+        }
+        let sources = dag.stages.filter { $0.id != dag.mergeStageID }
+        return estimatedParallelSubgraphCost(sources: sources, merge: mergeStage)
+    }
 }
 
-// MARK: - L8 MeshGraphExecutor sketch (PlanMaster-style withTaskGroup + candidate-pipeline traits)
+// MARK: - L8 Runtime DAG skeleton (Phase 8 minimal per approval)
+// RuntimeStage protocol, RuntimeDAG, StageResult, StageSideEffect, and the MeshGraphExecutor actor.
+// This is the *exact* minimal skeleton requested: protocol + DAG model + actor + result/side-effect types
+// + withTaskGroup for independents + deterministic merge + telemetry hooks.
+// One local demo DAG (using tiny protocol-conforming values) is exercised from the test.
+// Future adapters (full Grox PlanMaster, candidate-pipeline traits, Phoenix isolation, real side-effect application,
+// graph rewriting, KV/L7 integration) remain comments/inspirations only. No production surface.
 
-/// Minimal executor for L8 Runtime DAG subgraphs. Uses withTaskGroup for parallel independent stages
-/// (Grox PlanMaster gather), then merge. Stages use enable/run/sideEffect pattern (candidate-pipeline).
-/// Side effects here mutate the graph (KV prime, residency mark, weight update, L7 edges) -- exactly
-/// like home-mixer side effects. Phoenix isolation note: parallel sources (Epi || Drafter) should not
-/// crosstalk; only attend to shared prompt/context.
+/// Executable stage contract for the L8 Runtime DAG skeleton.
+/// Concrete stages (demo or future real) provide `run()`.
+public protocol RuntimeStage: Sendable {
+    var id: String { get }
+    var kind: RuntimeStageKind { get }
+    func run() async -> StageResult
+}
+
+/// Make the existing declarative modeling `MeshStage` (from the graph) optionally usable as a
+/// RuntimeStage via a no-op run. The one local demo DAG in tests uses dedicated tiny conformers
+/// (see test) so this has no observable effect on modeling or prior behavior.
+extension MeshStage: RuntimeStage {
+    public func run() async -> StageResult {
+        let t0 = Date()
+        return StageResult(stageID: id, kind: kind, success: true, duration: Date().timeIntervalSince(t0), payload: nil)
+    }
+}
+
+/// Result of executing one stage in the skeleton DAG.
+public struct StageResult: Sendable, Equatable {
+    public let stageID: String
+    public let kind: RuntimeStageKind?
+    public let success: Bool
+    public let duration: TimeInterval
+    public let payload: String?   // demo / future payload (e.g. "primed", "accepted-3")
+}
+
+/// Value describing a side effect produced by the merge step.
+/// (Application of the effect to graph / KV / weights is future work, inspired by home-mixer SideEffect.)
+public struct StageSideEffect: Sendable, Equatable {
+    public let fromStage: String
+    public let kind: String           // "deterministic-merge", "kv-prime-hint", ...
+    public let detail: String
+}
+
+/// Minimal executable DAG container (distinct from the world-model MeshComputationGraph).
+/// For the skeleton a list of stages + optional designated merge target is sufficient.
+/// One wave of independent stages + deterministic merge after satisfies the requirement.
+public struct RuntimeDAG: Sendable {
+    public let stages: [any RuntimeStage]
+    public let mergeStageID: String?
+
+    public init(stages: [any RuntimeStage], mergeStageID: String? = nil) {
+        self.stages = stages
+        self.mergeStageID = mergeStageID
+    }
+}
+
+// MARK: - L8 MeshGraphExecutor (now actor per approval; sketch retained for modeling compat)
+
+/// MeshGraphExecutor as actor (required). The prior struct sketch (executeParallelSubgraph using
+/// withTaskGroup + caller closures) is kept as-is so the landed modeling test continues to compile
+/// and run without modification. The new `execute(_:)` provides the canonical skeleton surface:
+/// RuntimeDAG in, (ordered [StageResult], [StageSideEffect]) out, withTaskGroup for independents,
+/// deterministic re-assembly by declaration order, merge step, and telemetry hooks (via existing MeshTelemetry).
 ///
-/// This is a *sketch* + toy for one parallel case. Real would integrate model contexts, full isolation masks,
-/// and be driven by the PlacementEngine for cost-based stage placement.
-public struct MeshGraphExecutor {
-    public init() {}
+/// Comments note the x-algorithm-main / vision inspirations; implementation of full adapters is out of scope.
+public actor MeshGraphExecutor {
+    private let telemetry: MeshTelemetry?
 
-    /// Execute a toy parallel L8 subgraph: run sources concurrently, then merge.
-    /// `runSource` and `onMerge` are provided by caller (can be real stage logic or mocks for test).
-    /// After, caller can invoke side-effects on the graph (e.g. via engine.rewrite or direct).
+    public init(telemetry: MeshTelemetry? = nil) {
+        self.telemetry = telemetry
+    }
+
+    /// Retained sketch (from the landed L8 modeling/toy). Uses withTaskGroup + caller-provided
+    /// closures. The modeling test continues to call this unchanged. Real skeleton work uses the
+    /// new `execute(_:)` below.
     public func executeParallelSubgraph(
         graph: inout MeshComputationGraph,
         sourceIDs: [String],
@@ -676,5 +847,80 @@ public struct MeshGraphExecutor {
         await onMerge(sourceIDs)
         // Example side-effect hook (in real use: KV prime for Epi source, L7 for drafter, rewrite for costs)
         // graph.mark... or engine.rewrite(...) would be called by the stage implementations.
+    }
+
+    /// Canonical skeleton entry point (Phase 8 deliverable).
+    /// Accepts a RuntimeDAG, runs its non-merge stages concurrently via withTaskGroup,
+    /// collects results deterministically in declaration order, performs the merge step
+    /// (emits final StageResult + at least one StageSideEffect), and fires telemetry hooks
+    /// (lightweight GenerationInfo records) when a MeshTelemetry was supplied at init.
+    /// This, together with the protocol + DAG + result/side-effect types, satisfies the
+    /// exact 7 items in the approval. The one local demo DAG in the test exercises it end-to-end.
+    public func execute(_ dag: RuntimeDAG) async -> (results: [StageResult], sideEffects: [StageSideEffect]) {
+        let parallelStages: [any RuntimeStage] = {
+            if let mid = dag.mergeStageID {
+                return dag.stages.filter { $0.id != mid }
+            }
+            return dag.stages
+        }()
+
+        var idToResult: [String: StageResult] = [:]
+
+        await withTaskGroup(of: (String, StageResult).self) { group in
+            for stage in parallelStages {
+                group.addTask { [stageID = stage.id] in
+                    let res = await stage.run()
+                    if let t = self.telemetry {
+                        let info = GenerationInfo(
+                            modelID: stageID,
+                            role: .primary,
+                            promptTokens: 0,
+                            generatedTokens: 0,
+                            duration: res.duration,
+                            tokensPerSecond: res.duration > 0 ? 1.0 / res.duration : 0,
+                            speculativeGamma: nil,
+                            acceptedTokens: nil,
+                            memoryPressureHint: nil,
+                            timestamp: Date()
+                        )
+                        await t.recordGenerationInfo(info)
+                    }
+                    return (stageID, res)
+                }
+            }
+            for await (id, res) in group {
+                idToResult[id] = res
+            }
+        }
+
+        // Deterministic merge step: results in the exact order the caller listed the parallel stages.
+        let declaredOrder = parallelStages.map { $0.id }
+        let orderedResults: [StageResult] = declaredOrder.compactMap { idToResult[$0] }
+
+        var sideEffects: [StageSideEffect] = []
+        let mergeID = dag.mergeStageID ?? "merge"
+        let mergeResult = StageResult(
+            stageID: mergeID,
+            kind: .primaryLLM,
+            success: true,
+            duration: 0,
+            payload: "merged-\(orderedResults.count)-stages"
+        )
+        sideEffects.append(StageSideEffect(
+            fromStage: mergeID,
+            kind: "deterministic-merge",
+            detail: "collected \(orderedResults.count) results in declaration order"
+        ))
+
+        if let t = self.telemetry {
+            let mInfo = GenerationInfo(
+                modelID: mergeID, role: .primary, promptTokens: 0, generatedTokens: 0,
+                duration: 0, tokensPerSecond: 0, speculativeGamma: nil, acceptedTokens: nil,
+                memoryPressureHint: nil, timestamp: Date()
+            )
+            await t.recordGenerationInfo(mInfo)
+        }
+
+        return (orderedResults + [mergeResult], sideEffects)
     }
 }

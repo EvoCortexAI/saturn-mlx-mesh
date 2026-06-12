@@ -46,11 +46,11 @@ public struct LayerBudgetAllocator {
         }
 
         // Proportional allocation
-        var allocations = powered.map { ($0 / sum) * Double(totalBudget) }
+        let allocations = powered.map { ($0 / sum) * Double(totalBudget) }
 
         // Convert to integers while preserving sum (largest remainder method)
         var ints = allocations.map { Int($0) }
-        var remainder = totalBudget - ints.reduce(0, +)
+        let remainder = totalBudget - ints.reduce(0, +)
 
         // Sort indices by fractional part descending
         let indicesByFrac = allocations.enumerated()

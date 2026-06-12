@@ -423,4 +423,110 @@ final class SaturnMLXMeshTests: XCTestCase {
         // using current decide/rewrite (L7 awareness, costs, residencies). Toy shows Phoenix-style parallel
         // without crosstalk (sources only "attend" to merge via onMerge).
     }
+
+    // MARK: - Phase 8: minimal Runtime DAG skeleton + one local demo DAG (must compile + run)
+
+    /// Exercises exactly the 7 artifacts required for the approved minimal skeleton:
+    /// RuntimeStage (via two local conformers), RuntimeDAG, MeshGraphExecutor (actor),
+    /// StageResult + StageSideEffect, withTaskGroup (inside execute), deterministic merge
+    /// (results returned in declaration order), telemetry hooks (MeshTelemetry passed to actor,
+    /// records asserted via snapshot after run).
+    /// The demo DAG is purely local / sim-safe (tiny sleeps, no MLX, no KV, no L7, no session).
+    /// This is "one local demo DAG" that the plan requires to compile and run.
+    func testL8MinimalRuntimeDAGSkeletonAndOneDemoDAG() async {
+        struct DemoEpi: RuntimeStage {
+            let id = "demo-epi"
+            let kind = RuntimeStageKind.epiKVSource
+            func run() async -> StageResult {
+                let t0 = Date()
+                try? await Task.sleep(for: .milliseconds(3))
+                return StageResult(stageID: id, kind: kind, success: true, duration: Date().timeIntervalSince(t0), payload: "epi-primed")
+            }
+        }
+        struct DemoDrafter: RuntimeStage {
+            let id = "demo-drafter"
+            let kind = RuntimeStageKind.drafterProposer
+            func run() async -> StageResult {
+                let t0 = Date()
+                try? await Task.sleep(for: .milliseconds(2))
+                return StageResult(stageID: id, kind: kind, success: true, duration: Date().timeIntervalSince(t0), payload: "draft-3")
+            }
+        }
+
+        let epi = DemoEpi()
+        let dra = DemoDrafter()
+        let dag = RuntimeDAG(stages: [epi, dra], mergeStageID: "merge-demo")
+
+        let tel = MeshTelemetry()
+        let exec = MeshGraphExecutor(telemetry: tel)
+
+        let (results, effects) = await exec.execute(dag)
+
+        // 1. results include the two independents + the merge result
+        XCTAssertEqual(results.count, 3)
+        // 2. deterministic merge: order matches declaration order of the parallel stages
+        XCTAssertEqual(results[0].stageID, "demo-epi")
+        XCTAssertEqual(results[1].stageID, "demo-drafter")
+        XCTAssertEqual(results[2].stageID, "merge-demo")
+        XCTAssertTrue(results.allSatisfy { $0.success })
+
+        // 3. merge step produced side-effect value(s)
+        XCTAssertTrue(effects.contains { $0.kind == "deterministic-merge" && $0.fromStage == "merge-demo" })
+
+        // 4. telemetry hooks fired (records for the demo stages + merge appear)
+        let snap = await tel.snapshot()
+        XCTAssertTrue(snap.generations.contains { $0.modelID == "demo-epi" })
+        XCTAssertTrue(snap.generations.contains { $0.modelID == "merge-demo" })
+
+        // 5. actor + withTaskGroup path completed without hang or violation (we reached here)
+
+        // === Phase 9: cost-weighted graph metadata (L9) exercised from the demo DAG ===
+        // Create a metadata graph, seed the stages (they get L9 defaults via addStage).
+        // After the executor run we feed the *real* StageResult.durations back as observed costs
+        // (exactly like a real side-effect or MeshSession recordObservedCostFrom would do for stages).
+        // Then we assert live weight updates and that the new estimated-cost query returns sensible numbers.
+        var costGraph = MeshComputationGraph()
+        let epiForMeta = MeshStage(kind: .epiKVSource, id: "demo-epi")
+        let draForMeta = MeshStage(kind: .drafterProposer, id: "demo-drafter")
+        costGraph.addStage(epiForMeta)   // will receive defaultStageWeight(.epiKVSource) — memory heavy
+        costGraph.addStage(draForMeta)   // default for drafterProposer — cheap/fast
+
+        // Before any run the weights are the kind defaults.
+        let beforeEpi = costGraph.stageWeight(for: "demo-epi", kind: .epiKVSource)
+        let beforeDra = costGraph.stageWeight(for: "demo-drafter", kind: .drafterProposer)
+
+        // Post-execute: translate the actual durations produced by the demo stages into L9 updates.
+        for res in results {
+            if res.stageID == "merge-demo" { continue }
+            let dur = max(res.duration, 0.001)
+            // Same proxy math used elsewhere in the package (tps → latency/compute)
+            let tps = 1.0 / dur * 60.0
+            let lat = max(0.001, 1.0 / tps)
+            let comp = max(0.5, 90.0 / tps)
+            costGraph.recordObservedCost(for: res.stageID, latency: lat, compute: comp)
+        }
+
+        let afterEpi = costGraph.stageWeight(for: "demo-epi", kind: .epiKVSource)
+        let afterDra = costGraph.stageWeight(for: "demo-drafter", kind: .drafterProposer)
+
+        // The observed run should have produced a noticeable improvement (lower latency) in the metadata.
+        XCTAssertLessThan(afterEpi.latency, beforeEpi.latency * 0.95,
+                          "L9: running the demo DAG and feeding StageResult durations back must reduce observed latency for epi stage")
+        XCTAssertLessThan(afterDra.latency, beforeDra.latency * 0.95,
+                          "L9: running the demo DAG and feeding StageResult durations back must reduce observed latency for drafter stage")
+
+        // The new L9 metadata query (estimated cost of the parallel subgraph) must return a positive number
+        // that reflects the current (post-feedback) weights + any edges.
+        let queryCost = costGraph.estimatedParallelSubgraphCost(sources: [epiForMeta, draForMeta],
+                                                                merge: MeshStage(kind: .primaryLLM, id: "merge-demo"))
+        XCTAssertGreaterThan(queryCost, 1.0, "L9 estimated subgraph cost should be non-trivial after weighting stages + edges")
+
+        // Also exercise the RuntimeDAG overload (include the merge stage in .stages so estimatedCost sees it,
+        // matching how describeParallelSubgraph and real modeling populate the graph).
+        let mergeForMeta = MeshStage(kind: .primaryLLM, id: "merge-demo")
+        let dagForCost = RuntimeDAG(stages: [epiForMeta, draForMeta, mergeForMeta], mergeStageID: "merge-demo")
+        let dagQuery = costGraph.estimatedCost(of: dagForCost)
+        // With the same stages the two queries should be essentially identical (no extra edges were added in this meta graph).
+        XCTAssertEqual(dagQuery, queryCost, accuracy: 0.01)
+    }
 }
