@@ -140,20 +140,75 @@ public actor MeshModel {
             Task {
                 do {
                     let count = try await container.perform { context in
-                        let input = try await context.processor.prepare(
-                            input: UserInput(prompt: prompt)
-                        )
-
                         if didSpec, let drafter = theDrafter {
                             // Full speculative acceptance: drafter proposes, verifier verifies.
-                            return try await self._runSpeculative(
+                            // Keep verifier LMInput confined to this verifier perform boundary.
+                            let proposed = try await self.proposeTokensFromDrafter(
                                 prompt: prompt,
-                                params: params,
-                                verifierContext: context,
                                 drafter: drafter,
                                 gamma: gamma!,
-                                continuation: continuation
+                                params: params
                             )
+
+                            if proposed.isEmpty {
+                                // Fallback: one token from verifier.
+                                let vCache = self.kvCacheBox.cache ?? []
+                                let vInput = try await context.processor.prepare(
+                                    input: UserInput(prompt: prompt)
+                                )
+                                let vIter = try TokenIterator(
+                                    input: vInput,
+                                    model: context.model,
+                                    cache: vCache,
+                                    parameters: params
+                                )
+                                var c = 0
+                                for token in vIter {
+                                    let text = context.tokenizer.decode(tokenIds: [token])
+                                    continuation.yield(GeneratedToken(text: text, tokenID: token))
+                                    c += 1
+                                    break
+                                }
+                                self.kvCacheBox.cache = vCache
+                                return c
+                            }
+
+                            // Verify proposals with the main verifier model + its cache.
+                            let currentVCache = self.kvCacheBox.cache ?? []
+                            let vInput = try await context.processor.prepare(
+                                input: UserInput(prompt: prompt)
+                            )
+
+                            let vIter = try TokenIterator(
+                                input: vInput,
+                                model: context.model,
+                                cache: currentVCache,
+                                parameters: params
+                            )
+
+                            var verifierTokens: [Int] = []
+                            for token in vIter {
+                                verifierTokens.append(token)
+                                if verifierTokens.count >= proposed.count { break }
+                            }
+
+                            // Accept matching prefix; on mismatch emit verifier's token (rejection).
+                            var accepted = 0
+                            for (p, v) in zip(proposed, verifierTokens) {
+                                if p == v {
+                                    let text = context.tokenizer.decode(tokenIds: [p])
+                                    continuation.yield(GeneratedToken(text: text, tokenID: p))
+                                    accepted += 1
+                                } else {
+                                    let text = context.tokenizer.decode(tokenIds: [v])
+                                    continuation.yield(GeneratedToken(text: text, tokenID: v))
+                                    accepted += 1
+                                    break
+                                }
+                            }
+
+                            self.kvCacheBox.cache = currentVCache
+                            return accepted
                         } else {
                             // Standard generation with explicit KV cache reuse.
                             // The cache lives in kvCacheBox (see class above) so it is
@@ -180,6 +235,10 @@ public actor MeshModel {
                                 }
                                 cacheToUse = self.kvCacheBox.cache!
                             }
+
+                            let input = try await context.processor.prepare(
+                                input: UserInput(prompt: prompt)
+                            )
 
                             let tokenIterator = try TokenIterator(
                                 input: input,
@@ -282,83 +341,5 @@ public actor MeshModel {
             }
             return proposed
         }
-    }
-
-    private func _runSpeculative(
-        prompt: String,
-        params: GenerateParameters,
-        verifierContext: ModelContext,
-        drafter: ModelContainer,
-        gamma: Int,
-        continuation: AsyncThrowingStream<GeneratedToken, Error>.Continuation
-    ) async throws -> Int {
-        // 1. Get proposals from the (fast) drafter.
-        let proposed = try await self.proposeTokensFromDrafter(
-            prompt: prompt,
-            drafter: drafter,
-            gamma: gamma,
-            params: params
-        )
-
-        if proposed.isEmpty {
-            // Fallback: one token from verifier
-            let vCache = self.kvCacheBox.cache ?? []
-            let vInput = try await verifierContext.processor.prepare(
-                input: UserInput(prompt: prompt)
-            )
-            let vIter = try TokenIterator(
-                input: vInput,
-                model: verifierContext.model,
-                cache: vCache,
-                parameters: params
-            )
-            var c = 0
-            for token in vIter {
-                let text = verifierContext.tokenizer.decode(tokenIds: [token])
-                continuation.yield(GeneratedToken(text: text, tokenID: token))
-                c += 1
-                break
-            }
-            self.kvCacheBox.cache = vCache
-            return c
-        }
-
-        // 2. Verify proposals with the main verifier model + its cache (shared reference).
-        let currentVCache = self.kvCacheBox.cache ?? []
-        let vInput = try await verifierContext.processor.prepare(
-            input: UserInput(prompt: prompt)
-        )
-
-        let vIter = try TokenIterator(
-            input: vInput,
-            model: verifierContext.model,
-            cache: currentVCache,
-            parameters: params
-        )
-
-        var verifierTokens: [Int] = []
-        for token in vIter {
-            verifierTokens.append(token)
-            if verifierTokens.count >= proposed.count { break }
-        }
-
-        // 3. Accept matching prefix; on mismatch emit verifier's token (rejection).
-        var accepted = 0
-        for (p, v) in zip(proposed, verifierTokens) {
-            if p == v {
-                let text = verifierContext.tokenizer.decode(tokenIds: [p])
-                continuation.yield(GeneratedToken(text: text, tokenID: p))
-                accepted += 1
-            } else {
-                let text = verifierContext.tokenizer.decode(tokenIds: [v])
-                continuation.yield(GeneratedToken(text: text, tokenID: v))
-                accepted += 1
-                break
-            }
-        }
-
-        self.kvCacheBox.cache = currentVCache
-
-        return accepted
     }
 }
