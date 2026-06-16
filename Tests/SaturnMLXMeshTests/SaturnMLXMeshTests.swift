@@ -329,7 +329,7 @@ final class SaturnMLXMeshTests: XCTestCase {
         // expensive-drafter scenarios.
         await mesh._registerModelForGraphTest(id: "model-a", role: .primary, unit: .gpu)
         let ep = ConversationEpisode(id: UUID(), turns: [.init(role: "user", content: "test residency")], embedding: [])
-        let kv = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep)
+        _ = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep)
         // Add second residency so rewrite mem pressure logic triggers (>1)
         let ep2 = ConversationEpisode(id: UUID(), turns: [.init(role: "user", content: "second for residency count")], embedding: [])
         _ = await mesh._buildAndRegisterEpisodeKVForTest(episode: ep2)
@@ -348,7 +348,7 @@ final class SaturnMLXMeshTests: XCTestCase {
             lastUpdated: Date()
         )
         await mesh.rewriteGraphUsingTelemetry()  // uses internal snapshot, but for test we can call after manual? For this, directly exercise engine
-        var gForRewrite = await mesh.currentComputationGraph()
+        let gForRewrite = await mesh.currentComputationGraph()
         // Before rewrite, latency ~1.0
         let before = gForRewrite.nodeWeights["local:gpu"]?.latency ?? 1.0
 
