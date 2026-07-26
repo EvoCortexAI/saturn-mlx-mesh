@@ -1,95 +1,153 @@
 # saturn-mlx-mesh
 
-**Mesh LLM extension for MLX on Apple Silicon**
+**MLX-native inference library for Apple Silicon**
 
-Part of [EvoIntelligenceFabric](https://evocortex.ai) — the execution plane (Saturn-Node).
+Part of EvoIntelligenceFabric and the Saturn-Node execution plane.
 
-The package is built toward the vision of **Saturn Mesh as a weighted directed computation graph** (not a neural network graph or network topology). This graph simultaneously describes models, layers, experts, devices, execution units (CPU/GPU/ANE under UMA), memory, and communication, with node weights w(v)=(compute, memory, power, latency) and edge weights w(e)=(latency, bandwidth, serialization). The scheduler optimizes min ∑w(v) + ∑w(e) subject to quality constraints. See the full vision in CHANGELOG.md.
+This package is built toward Saturn Mesh as a weighted directed computation graph. The long-term graph may describe models, layers, experts, devices, execution units, memory, communication, and placement cost. That research direction remains valid, but it is not the immediate MVP gate.
 
-## Public API (exact contract)
+## MVP Priority - One Reliable Local Inference Path
+
+The current priority is to prove one repeatable, real-hardware inference path on Saturn-Node-01 before expanding distributed mesh behavior.
+
+```text
+Saturn One -> Saturn-Control -> Saturn-Node runtime -> saturn-mlx-mesh / MLX model
+```
+
+This repository owns the **inference library**. It does not own:
+
+- the Saturn One user interface;
+- the Saturn-Control client-facing API;
+- node authentication or public network exposure;
+- service installation, launchd lifecycle, health endpoints, or operational rollback.
+
+Those runtime and operational responsibilities should live in a thin, private `saturn-node` service repository. Saturn-Control tracks creation of that repository until it exists.
+
+### MVP acceptance sequence
+
+1. Select and pin one model/runtime combination for SN01 after checking available memory, cached weights, and real hardware behavior.
+2. Complete a real model-load and streamed-generation smoke run from a documented clean state.
+3. Verify token streaming, explicit cancellation, timeout behavior, and recovery after client disconnect.
+4. Verify managed restart followed by successful inference without ad hoc repair.
+5. Record model ID, runtime revision, node identity, timing metadata, and outcome without logging prompt or generated-response content by default.
+6. Repeat the fixed acceptance prompt set before changing placement, speculative, episodic-memory, or graph behavior.
+
+`mlx-community/Qwen3-8B-4bit` is an existing smoke-test candidate, not a release commitment. The selected model must be confirmed from actual SN01 hardware evidence.
+
+### Deferred until the MVP gate is green
+
+- Multi-device execution and remote control-plane placement
+- Automatic multi-node routing
+- New Runtime DAG expansion
+- Additional scheduler complexity
+- New speculative-decoding research beyond what the selected path requires
+- Broader episodic-memory and hybrid RAG product integration
+
+## Public API
 
 ```swift
 let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
-let model = try await mesh.loadModel(id: "mlx-community/Qwen3-8B-4bit", role: .primary)
+let model = try await mesh.loadModel(
+    id: "mlx-community/Qwen3-8B-4bit",
+    role: .primary
+)
 let stream = try await model.generate(
     prompt: "Explain Saturn mesh inference.",
     maxTokens: 512,
     temperature: 0.7,
-    speculativeGamma: 4   // optional
+    speculativeGamma: 4
 )
 for try await token in stream {
     print(token.text, terminator: "")
 }
 ```
 
+The example demonstrates the current library surface. Production model selection, limits, and routing belong to the managed Saturn-Node runtime and Saturn-Control policy.
+
 ## Key Components
 
-- `MeshSession` — actor factory, control plane selection, policy
-- `MeshModel` — actor-isolated, generation (standard + speculativeGamma surface with real drafter usage), KV cache reuse via `TokenIterator` + `KVCacheBox`, telemetry hooks
-- `PlacementPolicy` + `AppleSiliconBalanced` — `MeshExecutionUnit`, `PlacementDecision`, `decide(role:)` with explicit `NodeWeight`/`EdgeWeight` cost model (w(v) + w(e))
-- `MeshTelemetry` — actor for load + generation records (truthful speculative fields)
-- Graph foundation types (`Device`, `SiliconExecutionUnit`, `NodeWeight`, `EdgeWeight`, `ModelComponent`, `episodeResidencies`) modeling the multi-level computation graph (Device/Silicon/Model/Placement/MoE/Mesh/Speculative/Runtime DAG/Weighted/Full) with live residency tracking for episodic memory
-- `KVCacheManager` + `LayerBudgetAllocator` + `EpisodeKVCache` for per-episode compressed KV caches (v0.3+ EpiCache: real MLX support, allocator-driven layer budgets, graph residency)
+- `MeshSession` - actor factory, control-plane selection, and placement policy
+- `MeshModel` - actor-isolated standard and speculative generation, KV-cache reuse, and telemetry hooks
+- `PlacementPolicy` and `AppleSiliconBalanced` - execution-unit decisions with explicit node and edge cost concepts
+- `MeshTelemetry` - load and generation records
+- Graph foundation types for devices, silicon execution units, model components, weights, and episode residency
+- `KVCacheManager`, `LayerBudgetAllocator`, and `EpisodeKVCache` for cached-prefix and episodic-memory work
 
-## Status (progressing toward full weighted computation graph)
+## Current Technical State
 
-- ✅ Exact public API surface (MeshSession + MeshModel are actors)
-- ✅ Real model loading wired via `LLMModelFactory` + Hub downloader/tokenizer loader macros (with required `HuggingFace`/`Tokenizers` products)
-- ✅ KV cache reuse implemented for main generation path (explicit `TokenIterator` + persistent cache via `KVCacheBox`)
-- ✅ Drafter loading: speculative path actually executes the attached drafter `ModelContainer` for proposals
-- ✅ Graph foundation types + explicit weighted cost model in placement (`NodeWeight` w(v), `EdgeWeight` w(e), cost-driven `placementCost`)
-- ✅ Placement policy wired + recorded in telemetry; decisions now report formal graph costs
-- ✅ Actor isolation throughout
-- ✅ Telemetry (truthful: speculative fields only when drafter attached *and* used)
-- ✅ Stream completion fixed (`continuation.finish()` on success)
-- ✅ Basic unit tests + coverage for generate behavior (.notLoaded, stream finishes, no-spec telemetry)
-- ✅ Opt-in hardware smoke executable (`SaturnMLXMeshSmoke`) for real inference (excluded from `swift test`)
-- ✅ v0.2 EpisodicMemoryIndex (text-level): utterance segmentation, embedding, K-means episodes, retrieval for long-context augmentation. Integrated into MeshSession.
-- Simulation hook (`_enableTestSuccessSimulation()`) preserved so unit tests/CI require no model weights or GPU
-- ✅ Phase 2: `KVCacheManager` + `EpisodeKVCache` (real MLX KV via @unchecked boxes, prefilled donation for block prefill, `getRealCache`/`storePrefilledCache` for priming) + `LayerBudgetAllocator` (sensitivity-aware per-layer budgets using proportional + largest-remainder) fully wired. Graph residency (`episodeResidencies` + `markEpisodeResidency`) ties episodic memory into the weighted DAG.
-- 11/11 tests (new coverage for allocator math, manager build/retrieve/store, session KV + graph residency).
-- See [CHANGELOG.md](CHANGELOG.md) for the full adopted graph vision (10 levels: Device Graph → Full Saturn Graph) and detailed milestone history. See the elaboration in [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for Phase 2 integration with the vision and x-algorithm-main patterns (candidate-pipeline side effects, PlanMaster, Phoenix two-tower + isolation).
+- Exact `MeshSession` and `MeshModel` actor-based API surface
+- Real model loading through MLX Swift LM and Hugging Face integrations
+- KV-cache reuse in the main generation path
+- Drafter-model loading and speculative-generation surfaces
+- Weighted graph and placement foundations
+- Actor isolation and stream completion handling
+- Telemetry that distinguishes actual speculative use
+- Opt-in Apple Silicon hardware smoke executable
+- Text-level episodic-memory indexing and retrieval
+- Per-episode KV-cache, allocation, and graph-residency foundations
+- Simulation hook so normal unit tests do not download model weights or require a GPU
 
-See [CHANGELOG.md](CHANGELOG.md) for the full adopted Saturn Mesh graph vision (the 10-level weighted directed computation graph) and detailed history. See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for additional rollout notes and math references (placement cost model, speculative speedup formula).
+The technical foundations are broader than the MVP. A feature being present in this package does not make it part of the first Saturn product or local-inference release gate.
 
-## Build & Test
+## Build and Test
 
-```bash
+```sh
 swift build
 swift test
 ```
 
-Requires Apple Silicon (macOS 15+ / iOS 18+ target) for real MLX execution. The unit tests are designed to pass without downloading large models.
+Real MLX execution requires compatible Apple Silicon. Unit tests are designed to run without downloading large model weights.
+
+Run the opt-in hardware smoke manually on the target node:
+
+```sh
+swift run SaturnMLXMeshSmoke
+```
+
+The smoke result is not sufficient by itself. The MVP also requires cancellation, restart, private-service, and end-to-end Saturn-Control verification.
 
 ## Dependencies
 
-- `mlx-swift-lm` (MLXLLM + MLXLMCommon + MLXHuggingFace)
-- `swift-huggingface` (HuggingFace module for downloader)
-- `swift-transformers` (Tokenizers for tokenizer loader)
+- `mlx-swift-lm` (`MLXLLM`, `MLXLMCommon`, and `MLXHuggingFace`)
+- `swift-huggingface` (`HuggingFace` downloader integration)
+- `swift-transformers` (`Tokenizers`)
+
+Dependency revisions used by the managed node must be pinned and recorded in its runtime manifest. Do not treat a floating package range as a production deployment record.
 
 ## Relationship to the Rest of Saturn
 
-- **Control plane**: `saturn-control` (orchestration, node registry, scheduling, OpenAI-compatible gateway). Never runs heavy inference.
-- **Execution plane**: This package + surrounding Saturn-Node runtime on Apple Silicon devices (primary/secondary/drafter roles, UMA placement, power telemetry).
-- **Client plane**: Saturn One (Apple app).
+- **Client plane:** Saturn One, the Apple-native user interface and control surface
+- **Control plane:** Saturn-Control, responsible for orchestration, policy coordination, request correlation, and the client-facing API; never heavy inference
+- **Execution service:** Saturn-Node, a private managed process that owns service lifecycle, authentication, health, and API adaptation
+- **Inference library:** this package, used by Saturn-Node for MLX-native execution
+- **Governance:** EvoEthics, introduced after the local-inference contract is proven and approved
 
-Nodes register capabilities with labels such as `["mlx", "primary"]`. This library powers the actual inference work on those nodes.
+Nodes may register capabilities such as `mlx` and `primary`, but automatic multi-node scheduling is outside the MVP.
 
-## Next (aligned with the graph vision + EpiCache memory)
+## Immediate Next Work
 
-**Phase 2 (completed):** Real MLX KV cache hooks, block-wise prefill (via prefilled donation), per-episode `EpisodeKVCache` objects (with `LayerBudgetAllocator`), full `KVCacheManager` integration, and graph residency tracking. See elaboration in Docs/ and CHANGELOG for vision + x-algorithm-main mappings.
+1. Create or approve the thin `saturn-node` runtime repository and its API/lifecycle boundary.
+2. Pin one SN01 runtime and candidate model in a machine-readable manifest.
+3. Run the real-hardware smoke and save reproducible metadata.
+4. Add fixed tests for stream completion, cancellation, disconnect, timeout, and restart behavior at the runtime boundary.
+5. Validate the complete Saturn-Control gateway path before resuming distributed graph work.
 
-1. Complete / harden full verifier/drafter speculative acceptance (propose + verify/accept/reject + rollback) and integrate with episodic + KV memory (L7 subgraph now has resident KV).
-2. Cross-device Device Graph / Mesh Expert Graph support and remote `ControlPlane` execution (L6; residency enables costed KV movement).
-3. Runtime DAG modeling (Router, Embedder, Vision, Reranker as first-class `ModelComponent`s) + basic `MeshKVCache` / graph scheduler that optimizes min ∑w(v) + ∑w(e) using live telemetry + residency (L8/L9/L10; Phase 3 target).
-4. Real-hardware validation, hybrid RAG + episodic KV flows, and expansion of the smoke/benchmark targets.
+The system-wide delivery order and acceptance thresholds are maintained in `saturn-control/docs/SATURN-MVP.md`.
 
-See [Docs/mesh-llm-mlx-extension.md](Docs/mesh-llm-mlx-extension.md) for the full elaborated integration note (Phase 2 as graph-resident memory, direct mappings to candidate-pipeline side effects / PlanMaster / Phoenix isolation / Thunder) and revised roadmap.
+## Long-Term Research Direction
 
-## License / Copyright
+After the single-node gate is reliable, the package may resume work on:
+
+- hardened verifier/drafter acceptance and rollback;
+- cross-device Device Graph and Mesh Expert Graph support;
+- Runtime DAG modeling for routers, embedders, vision, and rerankers;
+- telemetry-driven graph scheduling and residency-aware placement;
+- expanded episodic-memory, hybrid RAG, smoke, and benchmark targets.
+
+Long-term work must remain separable from the stable local-inference contract used by Saturn One and Saturn-Control.
+
+## License and Copyright
 
 Copyright © 2026 EvoCortexAI S.L. All rights reserved.
 
----
-
-This repository is intentionally separate from `saturn-control`. It is the MLX-native mesh execution component for private on-device inference in the EvoIntelligenceFabric.
+This repository is intentionally separate from Saturn-Control. It is the MLX-native inference component for private execution in EvoIntelligenceFabric, not the control plane or a standalone user-facing product.
