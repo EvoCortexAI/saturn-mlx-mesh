@@ -2,152 +2,203 @@
 
 **MLX-native inference library for Apple Silicon**
 
-Part of EvoIntelligenceFabric and the Saturn-Node execution plane.
+Part of EvoIntelligenceFabric and loaded inside Saturn-Node.
 
-This package is built toward Saturn Mesh as a weighted directed computation graph. The long-term graph may describe models, layers, experts, devices, execution units, memory, communication, and placement cost. That research direction remains valid, but it is not the immediate MVP gate.
+This package is not Saturn-Node itself. It is the in-process MLX execution library used by the private Saturn-Node inference service.
 
-## MVP Priority - One Reliable Local Inference Path
-
-The current priority is to prove one repeatable, real-hardware inference path on Saturn-Node-01 before expanding distributed mesh behavior.
+## Canonical runtime path
 
 ```text
-Saturn One -> Saturn-Control -> Saturn-Node runtime -> saturn-mlx-mesh / MLX model
+Saturn One or Saturn Container
+    -> Saturn-Control
+    -> Saturn-Control Container Runner
+    -> Apple Container agent workload
+    -> workload-authenticated Saturn-Node
+    -> saturn-mlx-mesh
+    -> MLX model
 ```
 
-This repository owns the **inference library**. It does not own:
+Frontends call Saturn-Control only. Agent containers call their assigned Saturn-Node with a short-lived compute credential issued by Saturn-Control.
 
-- the Saturn One user interface;
-- the Saturn-Control client-facing API;
-- node authentication or public network exposure;
-- service installation, launchd lifecycle, health endpoints, or operational rollback.
+This repository owns:
 
-Those runtime and operational responsibilities should live in a thin, private `saturn-node` service repository. Saturn-Control tracks creation of that repository until it exists.
+- MLX model loading and inference primitives;
+- token streaming;
+- cancellation hooks;
+- KV-cache behavior;
+- placement and graph research;
+- inference telemetry primitives;
+- deterministic simulation and hardware smoke support.
 
-### MVP acceptance sequence
+It does not own:
 
-1. Select and pin one model/runtime combination for SN01 after checking available memory, cached weights, and real hardware behavior.
-2. Complete a real model-load and streamed-generation smoke run from a documented clean state.
-3. Verify token streaming, explicit cancellation, timeout behavior, and recovery after client disconnect.
-4. Verify managed restart followed by successful inference without ad hoc repair.
-5. Record model ID, runtime revision, node identity, timing metadata, and outcome without logging prompt or generated-response content by default.
-6. Repeat the fixed acceptance prompt set before changing placement, speculative, episodic-memory, or graph behavior.
+- Apple Container execution or lifecycle;
+- Saturn-Control orchestration;
+- agent logic or tools;
+- workload credential issuance or verification;
+- a network listener or public API;
+- service installation, launchd lifecycle, health endpoints, or rollback;
+- user authentication;
+- frontend behavior.
 
-`mlx-community/Qwen3-8B-4bit` is an existing smoke-test candidate, not a release commitment. The selected model must be confirmed from actual SN01 hardware evidence.
+Those service responsibilities belong in a separate private `saturn-node` repository. Container execution belongs to Saturn-Control's Container Runner.
 
-### Deferred until the MVP gate is green
+## MVP priority - one reliable inference path
 
-- Multi-device execution and remote control-plane placement
-- Automatic multi-node routing
-- New Runtime DAG expansion
-- Additional scheduler complexity
-- New speculative-decoding research beyond what the selected path requires
-- Broader episodic-memory and hybrid RAG product integration
+The immediate priority is one repeatable, real-hardware inference path on Saturn-Node-01:
 
-## Public API
+```text
+agent container -> Saturn-Node -> saturn-mlx-mesh -> pinned MLX model
+```
+
+### Acceptance sequence
+
+1. Pin one MLX runtime revision and model manifest after checking target hardware.
+2. Complete a clean-state model-load and streamed-generation smoke.
+3. Verify token streaming, explicit cancellation, timeout, and disconnect recovery.
+4. Verify managed Saturn-Node restart followed by successful inference.
+5. Verify model, context, output, concurrency, and budget enforcement at the service boundary.
+6. Record model, runtime, node, timing, token-count, and outcome metadata without prompt or response content.
+7. Repeat a fixed acceptance set before expanding graph, placement, speculative, or episodic-memory behavior.
+
+`mlx-community/Qwen3-8B-4bit` is an existing smoke-test candidate, not a release commitment.
+
+### Deferred
+
+- multi-device execution;
+- automatic multi-node routing;
+- new Runtime DAG expansion;
+- additional scheduler complexity;
+- speculative-decoding research beyond the selected path;
+- broad episodic-memory and hybrid RAG integration;
+- service authentication or orchestration code in this package;
+- Apple Container integration.
+
+## Public library API
 
 ```swift
-let mesh = MeshSession(controlPlane: .local, policy: .appleSiliconBalanced)
+let mesh = MeshSession(
+    controlPlane: .local,
+    policy: .appleSiliconBalanced
+)
+
 let model = try await mesh.loadModel(
     id: "mlx-community/Qwen3-8B-4bit",
     role: .primary
 )
+
 let stream = try await model.generate(
     prompt: "Explain Saturn mesh inference.",
     maxTokens: 512,
     temperature: 0.7,
     speculativeGamma: 4
 )
+
 for try await token in stream {
     print(token.text, terminator: "")
 }
 ```
 
-The example demonstrates the current library surface. Production model selection, limits, and routing belong to the managed Saturn-Node runtime and Saturn-Control policy.
+This is an in-process library surface. Production model selection, workload authentication, quotas, request validation, and network streaming belong to Saturn-Node. Policy and compute assignment belong to Saturn-Control.
 
-## Key Components
+## Key components
 
-- `MeshSession` - actor factory, control-plane selection, and placement policy
-- `MeshModel` - actor-isolated standard and speculative generation, KV-cache reuse, and telemetry hooks
-- `PlacementPolicy` and `AppleSiliconBalanced` - execution-unit decisions with explicit node and edge cost concepts
-- `MeshTelemetry` - load and generation records
-- Graph foundation types for devices, silicon execution units, model components, weights, and episode residency
-- `KVCacheManager`, `LayerBudgetAllocator`, and `EpisodeKVCache` for cached-prefix and episodic-memory work
+- `MeshSession` - actor factory, local control-plane selection, and placement policy
+- `MeshModel` - actor-isolated generation, KV-cache reuse, and telemetry hooks
+- `PlacementPolicy` and `AppleSiliconBalanced` - execution-unit decisions with explicit cost concepts
+- `MeshTelemetry` - model-load and generation records
+- graph foundation types for devices, execution units, model components, weights, and residency
+- `KVCacheManager`, `LayerBudgetAllocator`, and `EpisodeKVCache`
 
-## Current Technical State
+The library's `controlPlane: .local` value is internal inference-library configuration. It does not mean Saturn-Control or Apple Container orchestration lives in this package.
 
-- Exact `MeshSession` and `MeshModel` actor-based API surface
-- Real model loading through MLX Swift LM and Hugging Face integrations
+## Current technical state
+
+- actor-based `MeshSession` and `MeshModel`
+- real model loading through MLX Swift LM and Hugging Face integrations
 - KV-cache reuse in the main generation path
-- Drafter-model loading and speculative-generation surfaces
-- Weighted graph and placement foundations
-- Actor isolation and stream completion handling
-- Telemetry that distinguishes actual speculative use
-- Opt-in Apple Silicon hardware smoke executable
-- Text-level episodic-memory indexing and retrieval
-- Per-episode KV-cache, allocation, and graph-residency foundations
-- Simulation hook so normal unit tests do not download model weights or require a GPU
+- drafter loading and speculative-generation surfaces
+- weighted graph and placement foundations
+- stream completion and cancellation-oriented structure
+- telemetry that distinguishes actual speculative use
+- opt-in Apple Silicon hardware smoke executable
+- episodic-memory indexing and retrieval foundations
+- simulation hook so unit tests avoid model downloads and GPU requirements
 
-The technical foundations are broader than the MVP. A feature being present in this package does not make it part of the first Saturn product or local-inference release gate.
+The technical foundation is broader than the MVP. A feature in this package is not automatically a supported Saturn product capability.
 
-## Build and Test
+## Build and test
 
 ```sh
 swift build
 swift test
 ```
 
-Real MLX execution requires compatible Apple Silicon. Unit tests are designed to run without downloading large model weights.
-
-Run the opt-in hardware smoke manually on the target node:
+Real MLX execution requires compatible Apple Silicon. Run the opt-in hardware smoke manually on the target:
 
 ```sh
 swift run SaturnMLXMeshSmoke
 ```
 
-The smoke result is not sufficient by itself. The MVP also requires cancellation, restart, private-service, and end-to-end Saturn-Control verification.
+The smoke alone is insufficient. Saturn-Node must also prove workload authentication, limits, streaming, cancellation, restart, and end-to-end agent-container behavior.
 
 ## Dependencies
 
-- `mlx-swift-lm` (`MLXLLM`, `MLXLMCommon`, and `MLXHuggingFace`)
-- `swift-huggingface` (`HuggingFace` downloader integration)
-- `swift-transformers` (`Tokenizers`)
+- `mlx-swift-lm`
+- `swift-huggingface`
+- `swift-transformers`
 
-Dependency revisions used by the managed node must be pinned and recorded in its runtime manifest. Do not treat a floating package range as a production deployment record.
+The managed Saturn-Node runtime must pin and record deployed dependency revisions. A floating SwiftPM range is not a production manifest.
 
-## Relationship to the Rest of Saturn
+## Saturn-Node integration
 
-- **Client plane:** Saturn One, the Apple-native user interface and control surface
-- **Control plane:** Saturn-Control, responsible for orchestration, policy coordination, request correlation, and the client-facing API; never heavy inference
-- **Execution service:** Saturn-Node, a private managed process that owns service lifecycle, authentication, health, and API adaptation
-- **Inference library:** this package, used by Saturn-Node for MLX-native execution
-- **Governance:** EvoEthics, introduced after the local-inference contract is proven and approved
+See [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md).
 
-Nodes may register capabilities such as `mlx` and `primary`, but automatic multi-node scheduling is outside the MVP.
+Saturn-Node wraps this library behind a private, workload-authenticated service boundary. A compute credential constrains deployment, node, model, context/output limits, concurrency, budget, and expiry.
 
-## Immediate Next Work
+The library never:
 
-1. Create or approve the thin `saturn-node` runtime repository and its API/lifecycle boundary.
-2. Pin one SN01 runtime and candidate model in a machine-readable manifest.
-3. Run the real-hardware smoke and save reproducible metadata.
-4. Add fixed tests for stream completion, cancellation, disconnect, timeout, and restart behavior at the runtime boundary.
-5. Validate the complete Saturn-Control gateway path before resuming distributed graph work.
+- parses workload credentials;
+- opens a network listener;
+- decides user authorization or policy;
+- loads a model outside the service allowlist;
+- receives Apple Container control commands;
+- executes agent tools.
 
-The system-wide delivery order and acceptance thresholds are maintained in `saturn-control/docs/SATURN-MVP.md`.
+## Relationship to Saturn
 
-## Long-Term Research Direction
+- **User client:** Saturn One
+- **Advanced operator:** Saturn Container
+- **Control plane and container execution authority:** Saturn-Control
+- **Container runtime adapter:** Saturn-Control Container Runner
+- **Agent runtime:** agent logic inside an Apple Container workload
+- **Inference service:** Saturn-Node
+- **Inference library:** this package
+- **Governance:** EvoEthics
 
-After the single-node gate is reliable, the package may resume work on:
+## Immediate next work
+
+1. Create and approve the separate `saturn-node` service repository.
+2. Define the private workload-authenticated inference contract there.
+3. Pin one runtime and model manifest.
+4. Run real-hardware smoke, cancellation, timeout, disconnect, and restart tests.
+5. Validate an agent container using a short-lived compute credential.
+6. Validate complete correlation through Saturn-Control before resuming distributed graph work.
+
+System-wide order and acceptance thresholds live in `saturn-control/docs/SATURN-MVP.md`.
+
+## Long-term research direction
+
+After the single-node gate is reliable:
 
 - hardened verifier/drafter acceptance and rollback;
-- cross-device Device Graph and Mesh Expert Graph support;
+- cross-device Device Graph and Mesh Expert Graph;
 - Runtime DAG modeling for routers, embedders, vision, and rerankers;
 - telemetry-driven graph scheduling and residency-aware placement;
-- expanded episodic-memory, hybrid RAG, smoke, and benchmark targets.
+- expanded episodic-memory, hybrid RAG, benchmarks, and hardware smokes.
 
-Long-term work must remain separable from the stable local-inference contract used by Saturn One and Saturn-Control.
+Long-term work must remain separable from the stable Saturn-Node inference contract.
 
-## License and Copyright
+## License and copyright
 
 Copyright © 2026 EvoCortexAI S.L. All rights reserved.
-
-This repository is intentionally separate from Saturn-Control. It is the MLX-native inference component for private execution in EvoIntelligenceFabric, not the control plane or a standalone user-facing product.
