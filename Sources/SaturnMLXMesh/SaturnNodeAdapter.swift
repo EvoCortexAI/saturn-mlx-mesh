@@ -326,34 +326,31 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
     public func generate(
         _ request: ValidatedInferenceRequest
     ) -> AsyncThrowingStream<InferenceChunk, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task { [weak self] in
-                guard let self else {
-                    continuation.finish(throwing: MeshInferenceError.runtimeUnavailable)
-                    return
-                }
-                await self.runGeneration(request: request, continuation: continuation)
-            }
-            continuation.onTermination = { [weak self] _ in
-                guard let self else { return }
-                Task {
-                    await self.consumerTerminated(requestID: request.requestID)
-                }
-            }
-            // Register immediately so cancel can find the request.
-            Task { [weak self] in
-                await self?.register(
-                    requestID: request.requestID,
-                    modelID: request.modelID,
-                    continuation: continuation,
-                    task: task
-                )
+        let pair = AsyncThrowingStream<InferenceChunk, Error>.makeStream(
+            bufferingPolicy: .bufferingNewest(32)
+        )
+        let continuation = pair.continuation
+
+        continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            Task {
+                await self.consumerTerminated(requestID: request.requestID)
             }
         }
+
+        // Kick off work on the actor so registration happens before generation proceeds.
+        Task { [weak self] in
+            guard let self else {
+                continuation.finish(throwing: MeshInferenceError.runtimeUnavailable)
+                return
+            }
+            await self.start(request: request, continuation: continuation)
+        }
+
+        return pair.stream
     }
 
     public func cancel(requestID: InferenceRequestID) async {
-        // Idempotent: already terminal is a no-op.
         if terminalIDs.contains(requestID) {
             return
         }
@@ -379,23 +376,42 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
 
     // MARK: - Internal
 
-    private func register(
-        requestID: InferenceRequestID,
-        modelID: String,
-        continuation: AsyncThrowingStream<InferenceChunk, Error>.Continuation,
-        task: Task<Void, Never>
-    ) {
-        // If already terminal (e.g. cancelled before register), do nothing.
-        if terminalIDs.contains(requestID) {
-            task.cancel()
+    private func start(
+        request: ValidatedInferenceRequest,
+        continuation: AsyncThrowingStream<InferenceChunk, Error>.Continuation
+    ) async {
+        if terminalIDs.contains(request.requestID) {
+            continuation.finish(throwing: MeshInferenceError.cancelled)
             return
         }
-        active[requestID] = ActiveRequest(
+
+        // Capacity gate before registration.
+        if config.forceCapacityExhausted || active.count >= config.maximumConcurrentRequests {
+            continuation.finish(throwing: MeshInferenceError.capacityExhausted)
+            terminalIDs.insert(request.requestID)
+            await telemetry.record(
+                AdapterTelemetryRecord(
+                    requestID: request.requestID,
+                    modelID: request.modelID,
+                    outcome: "capacity_exhausted",
+                    generatedTokenCount: 0,
+                    duration: 0
+                )
+            )
+            return
+        }
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runGeneration(request: request, continuation: continuation)
+        }
+
+        active[request.requestID] = ActiveRequest(
             continuation: continuation,
             task: task,
             generatedCount: 0,
             startedAt: Date(),
-            modelID: modelID
+            modelID: request.modelID
         )
     }
 
@@ -405,7 +421,6 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
     ) async {
         let startedAt = Date()
 
-        // Capacity / availability checks
         if config.forceModelUnavailable || !config.isLoaded {
             continuation.finish(throwing: MeshInferenceError.modelUnavailable(request.modelID))
             await markTerminal(requestID: request.requestID, modelID: request.modelID, outcome: "model_unavailable", count: 0, startedAt: startedAt)
@@ -415,14 +430,6 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
             continuation.finish(throwing: MeshInferenceError.modelUnavailable(request.modelID))
             await markTerminal(requestID: request.requestID, modelID: request.modelID, outcome: "model_unavailable", count: 0, startedAt: startedAt)
             return
-        }
-        if config.forceCapacityExhausted || active.count > config.maximumConcurrentRequests {
-            // active may already include this request from register; treat overflow as saturated
-            if active.count > config.maximumConcurrentRequests {
-                continuation.finish(throwing: MeshInferenceError.capacityExhausted)
-                await markTerminal(requestID: request.requestID, modelID: request.modelID, outcome: "capacity_exhausted", count: 0, startedAt: startedAt)
-                return
-            }
         }
         if config.forceTimeout {
             continuation.finish(throwing: MeshInferenceError.requestTimeout)
@@ -437,7 +444,6 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
 
         for i in 0..<chunks {
             if Task.isCancelled || terminalIDs.contains(request.requestID) {
-                // cancel path already emitted terminal; just exit
                 return
             }
             if let failAfter = config.forceInternalFailureAfterChunks, i >= failAfter {
@@ -454,9 +460,8 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
                 return
             }
 
-            let text = "tok\(i)"
             continuation.yield(
-                .delta(requestID: request.requestID, text: text, tokenID: i)
+                .delta(requestID: request.requestID, text: "tok\(i)", tokenID: i)
             )
             generated += 1
             if var session = active[request.requestID] {
