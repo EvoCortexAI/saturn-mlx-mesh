@@ -1,6 +1,6 @@
 # Saturn-Node Integration Boundary
 
-**Status:** Proposed service integration; no service implementation exists in this repository
+**Status:** Stable library adapter surface defined; service implementation lives in `saturn-node`
 
 ## Decision
 
@@ -10,18 +10,18 @@
 Agent container
     -> private TLS + short-lived compute credential
     -> Saturn-Node service
-    -> SaturnMLXMesh library
+    -> SaturnMLXMesh library (MLXInferenceRuntime adapter)
     -> MLX
 ```
 
 Saturn-Control issues the compute assignment and credential. The agent container does not select arbitrary models or load model weights directly.
 
-## Service-to-library adapter
+## Stable service-to-library adapter
 
-The future Saturn-Node service should depend on a narrow internal protocol:
+The Saturn-Node service depends on this narrow library protocol (see `SaturnNodeAdapter.swift`):
 
 ```swift
-protocol MLXInferenceRuntime: Sendable {
+public protocol MLXInferenceRuntime: Sendable {
     func capabilities() async throws -> InferenceCapabilities
 
     func generate(
@@ -31,6 +31,15 @@ protocol MLXInferenceRuntime: Sendable {
     func cancel(requestID: InferenceRequestID) async
 }
 ```
+
+Supporting types:
+
+- `InferenceRequestID` — opaque correlation ID from the caller
+- `ValidatedInferenceRequest` — model ID, prompt, max output tokens, optional temperature
+- `InferenceCapabilities` / `InferenceModelCapability` / `InferenceRuntimeState`
+- `InferenceChunk` — `.started` | `.delta` | `.completed` | `.cancelled`
+- `InferenceFinishReason` — `.stop` | `.length` | `.cancelled`
+- `MeshInferenceError` — modelUnavailable, capacityExhausted, requestTimeout, cancelled, notLoaded, generationFailed, runtimeUnavailable
 
 The service validates identity, authorization, model, limits, and budget before constructing `ValidatedInferenceRequest`.
 
@@ -54,6 +63,12 @@ The library does not receive:
 - database credentials;
 - unrestricted model paths.
 
+### Simulation implementation
+
+`SimulatedMLXInferenceRuntime` is the deterministic, CI-safe implementation. It proves completion, cancellation, timeout, capacity, model-unavailable, internal failure, cleanup, and subsequent-request recovery without downloading weights or touching SN01 hardware.
+
+A production implementation that drives a loaded `MeshModel` may be added later behind the same protocol. Real-hardware acceptance remains gated by issue #1.
+
 ## Compute credential boundary
 
 Saturn-Node validates a short-lived credential before calling the library. Its effective scope includes:
@@ -69,7 +84,7 @@ Saturn-Node validates a short-lived credential before calling the library. Its e
 - revocation/epoch state;
 - policy or approval reference when applicable.
 
-The exact token format and private wire endpoint belong to the future `saturn-node` repository. This library must not define or parse them.
+The exact token format and private wire endpoint belong to the `saturn-node` repository. This library must not define or parse them.
 
 ## Cancellation
 
@@ -83,25 +98,24 @@ Saturn One / Saturn Container stop
     -> SaturnMLXMesh generation task
 ```
 
-Requirements:
+Requirements (enforced by the adapter tests):
 
 - cancellation closes the stream once;
 - no orphan generation continues;
 - partial output is not misreported as success;
 - terminal metadata identifies cancellation without prompt/response content;
-- resource cleanup is bounded and testable.
+- resource cleanup is bounded and testable;
+- `cancel(requestID:)` is idempotent;
+- a subsequent request succeeds after cancellation and after failure.
 
 ## Telemetry
 
-The library may emit:
+The library may emit metadata-only records (`AdapterTelemetryRecord`):
 
-- model and runtime identifiers;
-- request correlation ID;
+- model and request correlation ID;
 - load and generation timing;
 - token counts;
-- memory/capacity indicators;
-- cancellation and terminal outcome;
-- placement and execution-unit metadata.
+- cancellation and terminal outcome.
 
 It must not emit prompt or generated-response content through standard telemetry.
 
@@ -109,32 +123,44 @@ Saturn-Node maps library telemetry into workload-scoped usage evidence. Saturn-C
 
 ## Failure mapping
 
-Library failures should be typed so Saturn-Node can distinguish:
+Library failures are typed so Saturn-Node can distinguish:
 
 - model unavailable;
-- model load failure;
-- unsupported generation parameter;
-- context limit exceeded;
+- model load failure / not loaded;
 - capacity exhausted;
 - generation timeout;
 - cancellation;
-- malformed internal output;
-- runtime incompatibility.
+- internal generation failure;
+- runtime unavailable.
 
 Authentication, authorization, lease expiry, revocation, and policy denial are Saturn-Node or Saturn-Control failures, not library failures.
+
+## Internal APIs that remain non-contractual
+
+The following types and surfaces are **not** part of the stable Saturn-Node adapter contract. Saturn-Node must not depend on them for the MVP inference path:
+
+- `MeshComputationGraph`, `MeshStage`, `RuntimeDAG`, `MeshGraphExecutor`
+- `PlacementPolicy`, `PlacementEngine`, `PlacementDecision`, `MeshExecutionUnit`
+- `EpisodicMemoryIndex`, `KVCacheManager`, `LayerBudgetAllocator`, `EpisodeKVCache`
+- speculative-decoding internals (drafter propose/verify paths inside `MeshModel`)
+- `MeshSession.loadModel`, `MeshSession.generateWithMemory`, graph rewrite hooks
+- `_enableTestSuccessSimulation`, `_registerModelForGraphTest`, and other test-only helpers
+
+These remain available for research and future single-node hardening after the real-hardware acceptance gate (issue #1) is green.
 
 ## Test boundary
 
 This repository tests:
 
-- deterministic simulated generation;
-- stream completion;
-- cancellation behavior exposed by the library;
-- model-load and generation errors;
-- telemetry correctness;
-- hardware smoke behavior.
+- deterministic simulated generation via `SimulatedMLXInferenceRuntime`;
+- stream completion and exactly one terminal outcome;
+- idempotent cancellation and consumer-termination cleanup;
+- timeout, model-unavailable, capacity, and internal-failure injection;
+- subsequent-request recovery after cancel and failure;
+- metadata-only telemetry;
+- existing MeshSession / placement / graph unit tests (non-contractual).
 
-The future Saturn-Node repository tests:
+The `saturn-node` repository tests:
 
 - credential validation;
 - model allowlisting;
@@ -154,4 +180,5 @@ The future Saturn-Node repository tests:
 - tool execution;
 - user approval;
 - public API compatibility;
-- automatic fleet scheduling.
+- automatic fleet scheduling;
+- real-hardware model pinning in this PR (see issue #1).
