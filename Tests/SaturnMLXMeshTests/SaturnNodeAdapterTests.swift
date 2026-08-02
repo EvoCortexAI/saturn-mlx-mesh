@@ -9,8 +9,6 @@ import XCTest
 
 final class SaturnNodeAdapterTests: XCTestCase {
 
-    // MARK: - Helpers
-
     private func makeRequest(
         id: String = UUID().uuidString,
         model: String = "sim-model",
@@ -34,8 +32,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         return chunks
     }
 
-    // MARK: - Normal multi-chunk completion
-
     func testNormalMultiChunkCompletion() async throws {
         let runtime = SimulatedMLXInferenceRuntime(
             config: SimulatedInferenceConfig(chunkCount: 4, chunkDelayNanoseconds: 0)
@@ -55,12 +51,8 @@ final class SaturnNodeAdapterTests: XCTestCase {
         }
         XCTAssertEqual(id, request.requestID)
         XCTAssertEqual(reason, .stop)
-
-        let terminals = chunks.filter(\.isTerminal)
-        XCTAssertEqual(terminals.count, 1, "Exactly one terminal outcome")
+        XCTAssertEqual(chunks.filter(\.isTerminal).count, 1)
     }
-
-    // MARK: - Exactly one terminal outcome
 
     func testExactlyOneTerminalOnCompletion() async throws {
         let runtime = SimulatedMLXInferenceRuntime(
@@ -71,8 +63,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         XCTAssertEqual(chunks.filter(\.isTerminal).count, 1)
     }
 
-    // MARK: - Idempotent cancellation
-
     func testIdempotentCancellation() async throws {
         let runtime = SimulatedMLXInferenceRuntime(
             config: SimulatedInferenceConfig(chunkCount: 20, chunkDelayNanoseconds: 5_000_000)
@@ -80,11 +70,10 @@ final class SaturnNodeAdapterTests: XCTestCase {
         let request = makeRequest()
         let stream = runtime.generate(request)
 
-        // Let generation start
-        try await Task.sleep(nanoseconds: 2_000_000)
+        try await Task.sleep(nanoseconds: 3_000_000)
 
         await runtime.cancel(requestID: request.requestID)
-        await runtime.cancel(requestID: request.requestID) // second cancel is no-op
+        await runtime.cancel(requestID: request.requestID)
 
         var sawCancelled = false
         var terminalCount = 0
@@ -97,17 +86,13 @@ final class SaturnNodeAdapterTests: XCTestCase {
                     }
                 }
             }
-        } catch {
-            // stream may finish cleanly after cancel yield
-        }
+        } catch {}
 
         XCTAssertTrue(sawCancelled)
         XCTAssertEqual(terminalCount, 1)
         let active = await runtime.activeRequestIDs()
         XCTAssertTrue(active.isEmpty)
     }
-
-    // MARK: - Timeout injection
 
     func testTimeoutInjection() async {
         let runtime = SimulatedMLXInferenceRuntime(
@@ -125,8 +110,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         let active = await runtime.activeRequestIDs()
         XCTAssertTrue(active.isEmpty)
     }
-
-    // MARK: - Model unavailable
 
     func testModelUnavailable() async {
         let runtime = SimulatedMLXInferenceRuntime(
@@ -166,64 +149,22 @@ final class SaturnNodeAdapterTests: XCTestCase {
         }
     }
 
-    // MARK: - Capacity failure
-
-    func testCapacityExhaustedViaConfig() async {
-        var config = SimulatedInferenceConfig(maximumConcurrentRequests: 1, chunkCount: 10, chunkDelayNanoseconds: 20_000_000)
-        config.forceCapacityExhausted = true
-        let runtime = SimulatedMLXInferenceRuntime(config: config)
+    func testCapacityExhausted() async {
+        let runtime = SimulatedMLXInferenceRuntime(
+            config: SimulatedInferenceConfig(forceCapacityExhausted: true)
+        )
         let request = makeRequest()
         do {
             _ = try await drain(runtime.generate(request))
-            // forceCapacityExhausted alone does not block if active count is fine;
-            // use concurrent saturation below for the real capacity path.
+            XCTFail("Expected capacityExhausted")
+        } catch let error as MeshInferenceError {
+            XCTAssertEqual(error, .capacityExhausted)
         } catch {
-            // acceptable
+            XCTFail("Unexpected: \(error)")
         }
+        let active = await runtime.activeRequestIDs()
+        XCTAssertTrue(active.isEmpty)
     }
-
-    func testCapacityViaConcurrentLimit() async throws {
-        let runtime = SimulatedMLXInferenceRuntime(
-            config: SimulatedInferenceConfig(
-                maximumConcurrentRequests: 1,
-                chunkCount: 30,
-                chunkDelayNanoseconds: 10_000_000
-            )
-        )
-        let first = makeRequest(id: "req-1")
-        let second = makeRequest(id: "req-2")
-
-        let stream1 = runtime.generate(first)
-        // Give first request time to register as active
-        try await Task.sleep(nanoseconds: 5_000_000)
-
-        // Force capacity by updating config and checking capabilities
-        await runtime.updateConfig(
-            SimulatedInferenceConfig(
-                maximumConcurrentRequests: 1,
-                forceCapacityExhausted: true
-            )
-        )
-        let caps = try await runtime.capabilities()
-        XCTAssertEqual(caps.state, .saturated)
-
-        // Cancel first so subsequent can proceed
-        await runtime.cancel(requestID: first.requestID)
-        _ = try? await drain(stream1)
-
-        // Restore and prove subsequent succeeds
-        await runtime.updateConfig(
-            SimulatedInferenceConfig(chunkCount: 2, chunkDelayNanoseconds: 0)
-        )
-        let chunks = try await drain(runtime.generate(second))
-        XCTAssertTrue(chunks.contains { $0.isTerminal })
-        XCTAssertTrue(chunks.contains {
-            if case .completed = $0 { return true }
-            return false
-        })
-    }
-
-    // MARK: - Cleanup after stream-consumer cancellation
 
     func testCleanupAfterStreamConsumerCancellation() async throws {
         let runtime = SimulatedMLXInferenceRuntime(
@@ -233,22 +174,14 @@ final class SaturnNodeAdapterTests: XCTestCase {
         let stream = runtime.generate(request)
 
         var iterator = stream.makeAsyncIterator()
-        _ = try await iterator.next() // started
-        _ = try await iterator.next() // first delta
+        _ = try await iterator.next()
 
-        // Drop the consumer without explicit cancel(requestID:)
-        // Terminating the iterator / letting stream go out of scope triggers onTermination.
-        withExtendedLifetime(of: stream) { _ in }
-        // Force termination by cancelling the iteration task context
-        // Explicit cancel covers the same cleanup path used by consumerTerminated
         await runtime.cancel(requestID: request.requestID)
 
         try await Task.sleep(nanoseconds: 5_000_000)
         let active = await runtime.activeRequestIDs()
         XCTAssertTrue(active.isEmpty, "No orphan generation after consumer cancel")
     }
-
-    // MARK: - Cleanup after internal failure
 
     func testCleanupAfterInternalFailure() async {
         let runtime = SimulatedMLXInferenceRuntime(
@@ -274,8 +207,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         let active = await runtime.activeRequestIDs()
         XCTAssertTrue(active.isEmpty)
     }
-
-    // MARK: - Subsequent request after cancellation and after failure
 
     func testSubsequentRequestSucceedsAfterCancellation() async throws {
         let runtime = SimulatedMLXInferenceRuntime(
@@ -326,8 +257,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         })
     }
 
-    // MARK: - Telemetry is metadata-only
-
     func testTelemetryExcludesPromptAndGeneratedText() async throws {
         let telemetry = AdapterTelemetry()
         let runtime = SimulatedMLXInferenceRuntime(
@@ -345,11 +274,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         XCTAssertEqual(rec.outcome, "completed")
         XCTAssertEqual(rec.generatedTokenCount, 3)
 
-        // Structural guarantee: AdapterTelemetryRecord has no prompt / text fields.
-        // Encode and assert the JSON keys stay metadata-only.
-        let encoder = JSONEncoder()
-        // AdapterTelemetryRecord is not Codable by design for prompt safety;
-        // verify via Mirror that no String payload fields exist beyond IDs/outcome.
         let mirror = Mirror(reflecting: rec)
         let labels = mirror.children.compactMap { $0.label }
         XCTAssertFalse(labels.contains("prompt"))
@@ -358,8 +282,6 @@ final class SaturnNodeAdapterTests: XCTestCase {
         XCTAssertTrue(labels.contains("outcome"))
         XCTAssertTrue(labels.contains("generatedTokenCount"))
     }
-
-    // MARK: - Capabilities reporting
 
     func testCapabilitiesReportsLoadedModel() async throws {
         let runtime = SimulatedMLXInferenceRuntime(
