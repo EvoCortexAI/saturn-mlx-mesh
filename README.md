@@ -8,24 +8,69 @@ This package is not Saturn-Node itself. It is the in-process MLX execution libra
 
 ## Canonical runtime path
 
-```text
-Saturn One or Saturn Container
-    -> Saturn-Control
-    -> Saturn-Control Container Runner
-    -> Apple Container agent workload
-    -> workload-authenticated Saturn-Node
-    -> saturn-mlx-mesh
-    -> MLX model
+```mermaid
+flowchart LR
+    One[Saturn One]
+    Container[Saturn Container]
+    Control[Saturn-Control]
+    Agent[Managed Agent Container]
+    Node[Saturn-Node]
+    Mesh[saturn-mlx-mesh]
+    MLX[MLX]
+
+    One -->|frontend API| Control
+    Container -->|frontend API| Control
+    Control --> Agent
+    Agent -->|workload-authenticated inference| Node
+    Node -->|in-process Swift API| Mesh
+    Mesh --> MLX
+
+    One -. forbidden .-> Node
+    Container -. forbidden .-> Node
+    Mesh -. no networking / auth / orchestration .-> Control
 ```
 
-Frontends call Saturn-Control only. Agent containers call their assigned Saturn-Node with a short-lived compute credential issued by Saturn-Control.
+Frontends call Saturn-Control only. Agent containers call their assigned Saturn-Node with bounded workload-scoped compute authority issued by Saturn-Control.
 
-This repository owns:
+## Package firewall
+
+```mermaid
+flowchart TB
+    Node[Saturn-Node]
+
+    subgraph MeshPkg[saturn-mlx-mesh]
+        Load[Model loading]
+        Generate[Generation / streaming]
+        Cancel[Native cancellation hooks]
+        Cache[KV cache / resource accounting]
+        Telemetry[Inference telemetry primitives]
+    end
+
+    ACP[ACP / JSON-RPC]
+    ControlTypes[Saturn-Control task/session types]
+    Auth[Workload auth / authority verification]
+    Network[Network listener]
+
+    Node --> Load
+    Node --> Generate
+    Node --> Cancel
+    Node --> Cache
+    Node --> Telemetry
+
+    ACP -. must not enter .-> MeshPkg
+    ControlTypes -. must not enter .-> MeshPkg
+    Auth -. belongs to Saturn-Node .-> Node
+    Network -. belongs to Saturn-Node .-> Node
+```
+
+The library must remain protocol-agnostic. It must not import ACP, JSON-RPC, Saturn-Control task/session modules, frontend types, or EvoEthics policy administration.
+
+## This repository owns
 
 - MLX model loading and inference primitives;
 - token streaming;
-- cancellation hooks;
-- KV-cache behavior;
+- native cancellation hooks;
+- KV-cache behavior and resource-accounting hooks needed for cancellation proof;
 - placement and graph research;
 - inference telemetry primitives;
 - deterministic simulation and hardware smoke support.
@@ -36,29 +81,40 @@ It does not own:
 - Saturn-Control orchestration;
 - agent logic or tools;
 - workload credential issuance or verification;
+- authority/receipt verification;
 - a network listener or public API;
 - service installation, launchd lifecycle, health endpoints, or rollback;
 - user authentication;
 - frontend behavior.
 
-Those service responsibilities belong in a separate private `saturn-node` repository. Container execution belongs to Saturn-Control's Container Runner.
+Those service responsibilities belong in Saturn-Node. Container execution belongs to Saturn-Control's Container Runner.
 
 ## MVP priority - one reliable inference path
 
-The immediate priority is one repeatable, real-hardware inference path on Saturn-Node-01:
+```mermaid
+flowchart LR
+    Request[Validated native inference request]
+    Generate[MLX generation]
+    Stream[Token stream]
+    Cancel[Cancellation signal]
+    Reclaim[Request-owned resources reclaimed]
+    Next[Equivalent next request succeeds]
 
-```text
-agent container -> Saturn-Node -> saturn-mlx-mesh -> pinned MLX model
+    Request --> Generate --> Stream
+    Cancel --> Generate
+    Generate --> Reclaim --> Next
 ```
+
+The immediate priority is one repeatable, real-hardware inference path on Saturn-Node-01.
 
 ### Acceptance sequence
 
 1. Pin one MLX runtime revision and model manifest after checking target hardware.
 2. Complete a clean-state model-load and streamed-generation smoke.
 3. Verify token streaming, explicit cancellation, timeout, and disconnect recovery.
-4. Verify managed Saturn-Node restart followed by successful inference.
-5. Verify model, context, output, concurrency, and budget enforcement at the service boundary.
-6. Record model, runtime, node, timing, token-count, and outcome metadata without prompt or response content.
+4. Verify request-owned resource reclamation after cancellation.
+5. Verify managed Saturn-Node restart followed by successful inference.
+6. Record model, runtime, node, timing, token-count, resource, and outcome metadata without prompt or response content.
 7. Repeat a fixed acceptance set before expanding graph, placement, speculative, or episodic-memory behavior.
 
 `mlx-community/Qwen3-8B-4bit` is an existing smoke-test candidate, not a release commitment.
@@ -114,18 +170,9 @@ The library's `controlPlane: .local` value is internal inference-library configu
 
 ## Current technical state
 
-- actor-based `MeshSession` and `MeshModel`
-- real model loading through MLX Swift LM and Hugging Face integrations
-- KV-cache reuse in the main generation path
-- drafter loading and speculative-generation surfaces
-- weighted graph and placement foundations
-- stream completion and cancellation-oriented structure
-- telemetry that distinguishes actual speculative use
-- opt-in Apple Silicon hardware smoke executable
-- episodic-memory indexing and retrieval foundations
-- simulation hook so unit tests avoid model downloads and GPU requirements
+The technical foundation includes actor-based model/session surfaces, MLX Swift LM and Hugging Face integrations, cache/research foundations, streaming/cancellation-oriented structure, telemetry, simulation support, and opt-in Apple Silicon hardware smoke support.
 
-The technical foundation is broader than the MVP. A feature in this package is not automatically a supported Saturn product capability.
+A feature in this package is not automatically a supported Saturn product capability.
 
 ## Build and test
 
@@ -140,7 +187,7 @@ Real MLX execution requires compatible Apple Silicon. Run the opt-in hardware sm
 swift run SaturnMLXMeshSmoke
 ```
 
-The smoke alone is insufficient. Saturn-Node must also prove workload authentication, limits, streaming, cancellation, restart, and end-to-end agent-container behavior.
+The smoke alone is insufficient. Saturn-Node must also prove workload authentication, limits, streaming, cancellation, restart, and end-to-end managed-agent behavior.
 
 ## Dependencies
 
@@ -154,16 +201,7 @@ The managed Saturn-Node runtime must pin and record deployed dependency revision
 
 See [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md).
 
-Saturn-Node wraps this library behind a private, workload-authenticated service boundary. A compute credential constrains deployment, node, model, context/output limits, concurrency, budget, and expiry.
-
-The library never:
-
-- parses workload credentials;
-- opens a network listener;
-- decides user authorization or policy;
-- loads a model outside the service allowlist;
-- receives Apple Container control commands;
-- executes agent tools.
+Saturn-Node wraps this library behind a private, workload-authenticated service boundary. The library never parses workload credentials, opens a network listener, decides user authorization/policy, or executes agent tools.
 
 ## Relationship to Saturn
 
@@ -175,17 +213,6 @@ The library never:
 - **Inference service:** Saturn-Node
 - **Inference library:** this package
 - **Governance:** EvoEthics
-
-## Immediate next work
-
-1. Create and approve the separate `saturn-node` service repository.
-2. Define the private workload-authenticated inference contract there.
-3. Pin one runtime and model manifest.
-4. Run real-hardware smoke, cancellation, timeout, disconnect, and restart tests.
-5. Validate an agent container using a short-lived compute credential.
-6. Validate complete correlation through Saturn-Control before resuming distributed graph work.
-
-System-wide order and acceptance thresholds live in `saturn-control/docs/SATURN-MVP.md`.
 
 ## Long-term research direction
 
