@@ -2,25 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: saturn-mlx-mesh-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    runs-on: macos-latest
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Select Xcode
-      run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-    - name: Show Swift version
-      run: swift --version
-
-    - name: Build
-      run: swift build -v
-
-    - name: Run tests
-      run: swift test -v
+  package:
+    name: Swift Package
+    uses: EvoCortexAI/ci-platform/.github/workflows/swift-package-ci.yml@aa8bca785e33d4cb81709e785841d21d3697d774
