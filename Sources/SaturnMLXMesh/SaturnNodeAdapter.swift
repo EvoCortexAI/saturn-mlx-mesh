@@ -323,7 +323,7 @@ public actor SimulatedMLXInferenceRuntime: MLXInferenceRuntime {
         )
     }
 
-    public func generate(
+    public nonisolated func generate(
         _ request: ValidatedInferenceRequest
     ) -> AsyncThrowingStream<InferenceChunk, Error> {
         let pair = AsyncThrowingStream<InferenceChunk, Error>.makeStream(
