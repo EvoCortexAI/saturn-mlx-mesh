@@ -92,6 +92,7 @@ public actor MeshModel {
                 Task {
                     let generated = max(0, min(maxTokens, 4))
                     for i in 0..<generated {
+                        if Task.isCancelled { break }
                         continuation.yield(GeneratedToken(text: "tok\(i)", tokenID: i))
                     }
 
@@ -164,6 +165,7 @@ public actor MeshModel {
                                 )
                                 var c = 0
                                 for token in vIter {
+                                    if Task.isCancelled { break }
                                     let text = context.tokenizer.decode(tokenIds: [token])
                                     continuation.yield(GeneratedToken(text: text, tokenID: token))
                                     c += 1
@@ -188,6 +190,7 @@ public actor MeshModel {
 
                             var verifierTokens: [Int] = []
                             for token in vIter {
+                                if Task.isCancelled { break }
                                 verifierTokens.append(token)
                                 if verifierTokens.count >= proposed.count { break }
                             }
@@ -195,6 +198,7 @@ public actor MeshModel {
                             // Accept matching prefix; on mismatch emit verifier's token (rejection).
                             var accepted = 0
                             for (p, v) in zip(proposed, verifierTokens) {
+                                if Task.isCancelled { break }
                                 if p == v {
                                     let text = context.tokenizer.decode(tokenIds: [p])
                                     continuation.yield(GeneratedToken(text: text, tokenID: p))
@@ -211,17 +215,6 @@ public actor MeshModel {
                             return accepted
                         } else {
                             // Standard generation with explicit KV cache reuse.
-                            // The cache lives in kvCacheBox (see class above) so it is
-                            // reused on the next call to generate() on this model.
-                            //
-                            // v0.3 Epi KV: if a prefilled episode cache is provided (from
-                            // Session via retrieveContextWithKV + manager.getPrefilledCache after
-                            // a buildEpisodeCache + donation), use it as the starting cache for
-                            // the TokenIterator. The 'prompt' arg in this case is the new query
-                            // only (not the full augmented text); the prefilled cache already
-                            // holds the state for the retrieved context prefix. This avoids
-                            // re-prefilling long retrieved episodes.
-                            // The main conversation kvCacheBox remains for non-primed turns.
                             let cacheToUse: [any KVCache]
                             if let pre = prefilledCache?.cache {
                                 cacheToUse = pre
@@ -248,8 +241,8 @@ public actor MeshModel {
                             )
 
                             var c = 0
-                            // TokenIterator yields raw token IDs. We decode for the stream.
                             for token in tokenIterator {
+                                if Task.isCancelled { break }
                                 let text = context.tokenizer.decode(tokenIds: [token])
                                 continuation.yield(GeneratedToken(text: text, tokenID: token))
                                 c += 1
@@ -287,24 +280,6 @@ public actor MeshModel {
     }
 
     // MARK: - Speculative acceptance (verifier/drafter)
-    //
-    // This implements the full "propose with drafter + verify/accept/reject with
-    // main verifier" logic (Level 7 Speculative Graph).
-    //
-    // - Drafter proposes up to `gamma` tokens (fast, using its own cache).
-    // - Verifier checks the proposals against what it would generate.
-    // - Accept the longest matching prefix.
-    // - On first rejection, emit the verifier's correct token instead.
-    // - The verifier's cache (kvCacheBox) is advanced only for accepted tokens
-    //   + the correction (rejection sampling fallback).
-    //
-    // In graph terms (Phase 1+): the drafter propose path is a Source (candidate-pipeline style),
-    // the zip prefix match + correction is a Selector, and the KV box update + telemetry record
-    // are SideEffects that mutate graph state / weights. A MeshGraphExecutor (PlanMaster gather/merge
-    // analog using withTaskGroup) will later run such stages for L7/L8 subgraphs in parallel.
-    //
-    // Simplified for v0.1 but with correct rejection behavior and cache discipline.
-    // Full parallel verification / acceptance probability math can be refined later.
 
     private func proposeTokensFromDrafter(
         prompt: String,
@@ -336,6 +311,7 @@ public actor MeshModel {
 
             var proposed: [Int] = []
             for token in diter {
+                if Task.isCancelled { break }
                 proposed.append(token)
                 if proposed.count >= gamma { break }
             }

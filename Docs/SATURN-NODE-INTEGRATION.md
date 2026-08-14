@@ -1,6 +1,6 @@
 # Saturn-Node Integration Boundary
 
-**Status:** Stable library adapter surface defined; service implementation lives in `saturn-node`
+**Status:** Stable library adapter surface defined; real MLX path available; service implementation lives in `saturn-node`
 
 ## Decision
 
@@ -32,153 +32,39 @@ public protocol MLXInferenceRuntime: Sendable {
 }
 ```
 
-Supporting types:
+### Implementations
 
-- `InferenceRequestID` — opaque correlation ID from the caller
-- `ValidatedInferenceRequest` — model ID, prompt, max output tokens, optional temperature
-- `InferenceCapabilities` / `InferenceModelCapability` / `InferenceRuntimeState`
-- `InferenceChunk` — `.started` | `.delta` | `.completed` | `.cancelled`
-- `InferenceFinishReason` — `.stop` | `.length` | `.cancelled`
-- `MeshInferenceError` — modelUnavailable, capacityExhausted, requestTimeout, cancelled, notLoaded, generationFailed, runtimeUnavailable
+| Type | Purpose |
+|------|--------|
+| `SimulatedMLXInferenceRuntime` | Deterministic CI / unit tests. **No weights.** |
+| `MeshModelInferenceRuntime` | **Real MLX.** Loads `MeshModel` via `MeshSession`, streams tokens. |
 
-The service validates identity, authorization, model, limits, and budget before constructing `ValidatedInferenceRequest`.
+```swift
+// Real path (Apple Silicon, downloads/caches weights):
+let runtime = try await MeshModelInferenceRuntime.loadPrimary()
+// model id defaults to AcceptanceModelPin.primaryModelID
+```
 
-The library receives:
+Saturn-Node default composition must remain fail-closed. Select `MeshModelInferenceRuntime` only under explicit opt-in (local smoke, Founder-gated hardware acceptance). Never construct it from ordinary CI unit tests.
 
-- validated model identifier;
-- prompt/input required for inference;
-- context and output-token bounds;
-- approved generation parameters;
-- cancellation context;
-- metadata correlation identifier.
-
-The library does not receive:
-
-- raw bearer credentials;
-- user authentication tokens;
-- policy signing keys;
-- Container Runner commands;
-- Apple Container sockets;
-- agent tool definitions;
-- database credentials;
-- unrestricted model paths.
-
-### Simulation implementation
-
-`SimulatedMLXInferenceRuntime` is the deterministic, CI-safe implementation. It proves completion, cancellation, timeout, capacity, model-unavailable, internal failure, cleanup, and subsequent-request recovery without downloading weights or touching SN01 hardware.
-
-A production implementation that drives a loaded `MeshModel` may be added later behind the same protocol. Real-hardware acceptance remains gated by issue #1.
+Supporting types: `InferenceRequestID`, `ValidatedInferenceRequest`, `InferenceCapabilities`, `InferenceChunk`, `MeshInferenceError`, `AdapterTelemetry`.
 
 ### Acceptance model pin
 
-Primary KF / mesh#1 model identity:
-
 - `AcceptanceModelPin.primaryModelID` → `mlx-community/Qwen3-8B-4bit`
-- Procedure and evidence requirements: [`ACCEPTANCE-MODEL.md`](ACCEPTANCE-MODEL.md)
-
-Saturn-Node should allowlist this identity for the single-node gate. Default node composition remains fail-closed until Founder-gated opt-in after recorded hardware evidence.
+- Procedure: [`ACCEPTANCE-MODEL.md`](ACCEPTANCE-MODEL.md)
 
 ## Compute credential boundary
 
-Saturn-Node validates a short-lived credential before calling the library. Its effective scope includes:
-
-- workload identity;
-- agent deployment ID;
-- Saturn-Node ID;
-- allowed model;
-- context and output limits;
-- concurrency;
-- request/token budget;
-- issue and expiry times;
-- revocation/epoch state;
-- policy or approval reference when applicable.
-
-The exact token format and private wire endpoint belong to the `saturn-node` repository. This library must not define or parse them.
+Saturn-Node validates a short-lived credential before calling the library. The library does not parse credentials, open listeners, or decide authorization.
 
 ## Cancellation
 
-Cancellation must propagate:
-
-```text
-Saturn One / Saturn Container stop
-    -> Saturn-Control
-    -> agent deployment or agent session
-    -> Saturn-Node request
-    -> SaturnMLXMesh generation task
-```
-
-Requirements (enforced by the adapter tests):
-
-- cancellation closes the stream once;
-- no orphan generation continues;
-- partial output is not misreported as success;
-- terminal metadata identifies cancellation without prompt/response content;
-- resource cleanup is bounded and testable;
-- `cancel(requestID:)` is idempotent;
-- a subsequent request succeeds after cancellation and after failure.
+Cancellation must propagate to the library `cancel(requestID:)` and stop active generation. `MeshModel` token loops respect `Task.isCancelled`. Exactly one terminal chunk; subsequent request must succeed.
 
 ## Telemetry
 
-The library may emit metadata-only records (`AdapterTelemetryRecord`):
-
-- model and request correlation ID;
-- load and generation timing;
-- token counts;
-- cancellation and terminal outcome.
-
-It must not emit prompt or generated-response content through standard telemetry.
-
-Saturn-Node maps library telemetry into workload-scoped usage evidence. Saturn-Control owns cross-component audit correlation.
-
-## Failure mapping
-
-Library failures are typed so Saturn-Node can distinguish:
-
-- model unavailable;
-- model load failure / not loaded;
-- capacity exhausted;
-- generation timeout;
-- cancellation;
-- internal generation failure;
-- runtime unavailable.
-
-Authentication, authorization, lease expiry, revocation, and policy denial are Saturn-Node or Saturn-Control failures, not library failures.
-
-## Internal APIs that remain non-contractual
-
-The following types and surfaces are **not** part of the stable Saturn-Node adapter contract. Saturn-Node must not depend on them for the MVP inference path:
-
-- `MeshComputationGraph`, `MeshStage`, `RuntimeDAG`, `MeshGraphExecutor`
-- `PlacementPolicy`, `PlacementEngine`, `PlacementDecision`, `MeshExecutionUnit`
-- `EpisodicMemoryIndex`, `KVCacheManager`, `LayerBudgetAllocator`, `EpisodeKVCache`
-- speculative-decoding internals (drafter propose/verify paths inside `MeshModel`)
-- `MeshSession.loadModel`, `MeshSession.generateWithMemory`, graph rewrite hooks
-- `_enableTestSuccessSimulation`, `_registerModelForGraphTest`, and other test-only helpers
-
-These remain available for research and future single-node hardening after the real-hardware acceptance gate (issue #1) is green.
-
-## Test boundary
-
-This repository tests:
-
-- deterministic simulated generation via `SimulatedMLXInferenceRuntime`;
-- stream completion and exactly one terminal outcome;
-- idempotent cancellation and consumer-termination cleanup;
-- timeout, model-unavailable, capacity, and internal-failure injection;
-- subsequent-request recovery after cancel and failure;
-- metadata-only telemetry;
-- existing MeshSession / placement / graph unit tests (non-contractual).
-
-The `saturn-node` repository tests:
-
-- credential validation;
-- model allowlisting;
-- quotas and concurrency;
-- network streaming;
-- disconnect cancellation;
-- service restart and rollback;
-- workload isolation;
-- end-to-end agent-container requests.
+Metadata-only (`AdapterTelemetryRecord`). No prompt or response bodies in standard records.
 
 ## Explicit non-goals
 
@@ -186,8 +72,4 @@ The `saturn-node` repository tests:
 - workload token parsing;
 - Apple Container integration;
 - agent orchestration;
-- tool execution;
-- user approval;
-- public API compatibility;
-- automatic fleet scheduling;
-- claiming mesh#1 closed without recorded hardware evidence (see issue #1 and `ACCEPTANCE-MODEL.md`).
+- claiming mesh#1 closed without recorded hardware evidence.
