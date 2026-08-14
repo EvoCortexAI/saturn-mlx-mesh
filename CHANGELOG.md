@@ -8,6 +8,8 @@ Keep active work in `Unreleased`, then promote to a dated release section when c
 
 ## [Unreleased]
 
+- **KF / mesh#1 model pin:** `AcceptanceModelPin.primaryModelID` = `mlx-community/Qwen3-8B-4bit`. Smoke executable and docs use the constant. Hardware acceptance evidence is still required to close issue #1; 32B remains out of the primary path. See `Docs/ACCEPTANCE-MODEL.md`.
+
 - Clarified the product boundary: this package is Saturn-Node's in-process MLX inference library; Saturn-Control runs agent containers, and the separate Saturn-Node service owns workload authentication, quotas, network streaming, and lifecycle.
 
 - Phase 9: cost-weighted graph metadata (L9 only; no remote execution). Stages (RuntimeStage / MeshStage) and RuntimeDAG edges are now first-class weighted vertices/edges in MeshComputationGraph (addStage with initialWeight or kind defaults via defaultStageWeight(for:), stageWeight lookup, addStageEdge preserves w(e)). Added pure L9 query helpers: estimatedParallelSubgraphCost and estimatedCost(of dag:) that compute ∑w(v) + relevant w(e) using current nodeWeights + edges (with UMA ~0 and residency mem pressure already reflected). Executor demo DAG runs now feed real StageResult.durations back as live cost updates (recordObservedCost on stage ids); tests assert weight improvement + query returns sensible values. Light additive stage handling in PlacementEngine (currentStageCost helper + rewrite now blends stage-keyed gens from telemetry). All P8 modeling + 14 prior tests untouched and green. Strictly metadata enrichment per plan; single-node / local focus only.

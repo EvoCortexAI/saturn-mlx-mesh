@@ -11,12 +11,10 @@
 // Run manually on Apple Silicon hardware (after `swift build` or via `swift run`):
 //     swift run SaturnMLXMeshSmoke
 //
-// It exercises the narrow real-loading checkpoint:
-//   let mesh = MeshSession(...)
-//   let model = try await mesh.loadModel(id: "mlx-community/Qwen3-8B-4bit")
-//   let stream = try await model.generate(prompt: "...", maxTokens: 32)
-//
+// Model identity comes from `AcceptanceModelPin` (mesh#1 / KF primary).
 // Expected: real decoded tokens are streamed from a live MLX container.
+// Record load time, TTFT, tokens/sec, cancel+reclaim, and dependency pins
+// after a successful run — do not treat a single ad-hoc CLI success as closed.
 
 import Foundation
 import SaturnMLXMesh
@@ -24,12 +22,16 @@ import SaturnMLXMesh
 @main
 struct SaturnMLXMeshSmoke {
     static func main() async throws {
+        let modelID = AcceptanceModelPin.primaryModelID
+        let prompt = AcceptanceModelPin.acceptancePrompt
+        let maxTokens = AcceptanceModelPin.smokeMaxTokens
+
         print("=== saturn-mlx-mesh real-loading smoke ===")
         print("Control plane: .local")
         print("Policy: .appleSiliconBalanced")
-        print("Model: mlx-community/Qwen3-8B-4bit (or the 4-bit Qwen variant available)")
-        print("Prompt: \"Explain Saturn mesh inference in one short sentence.\"")
-        print("maxTokens: 32")
+        print("Model: \(modelID) (\(AcceptanceModelPin.primaryRole))")
+        print("Prompt: \"\(prompt)\"")
+        print("maxTokens: \(maxTokens)")
         print("")
 
         let mesh = MeshSession(
@@ -38,13 +40,13 @@ struct SaturnMLXMeshSmoke {
         )
 
         let model = try await mesh.loadModel(
-            id: "mlx-community/Qwen3-8B-4bit",
+            id: modelID,
             role: .primary
         )
 
         let stream = try await model.generate(
-            prompt: "Explain Saturn mesh inference in one short sentence.",
-            maxTokens: 32,
+            prompt: prompt,
+            maxTokens: maxTokens,
             temperature: 0.7
         )
 
@@ -55,5 +57,6 @@ struct SaturnMLXMeshSmoke {
         }
         print("\n")
         print("Smoke completed successfully (real tokens received).")
+        print("Next: record timings + dependency pins into mesh#1 acceptance notes.")
     }
 }
