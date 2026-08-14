@@ -1,19 +1,19 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.3
 // Copyright © 2026 EvoCortexAI S.L. All rights reserved.
 //
 // saturn-mlx-mesh
-// Mesh LLM extension for MLX on Apple Silicon (EvoIntelligenceFabric execution plane).
+// MLX-native inference library for Apple Silicon (EvoIntelligenceFabric execution plane).
 //
-// v0.1 initial skeleton.
-// Part of the Saturn-Node / execution plane. See README.md and Docs/ for status.
+// The package baseline intentionally matches the Saturn-Node deployment toolchain.
+// Real hardware acceptance is performed separately from deterministic CI.
 
 import PackageDescription
 
 let package = Package(
     name: "saturn-mlx-mesh",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18)
+        .macOS(.v26),
+        .iOS(.v26)
     ],
     products: [
         .library(
@@ -23,15 +23,14 @@ let package = Package(
     ],
     dependencies: [
         // mlx-swift-lm provides MLXLLM + MLXLMCommon + the underlying MLX runtime.
-        // Use a recent compatible version; update after validating against
-        // actual deployed Saturn-Node hardware.
+        // The SwiftPM lower bound is a development compatibility range; deployed
+        // Saturn-Node acceptance must record the exact resolved revision.
         .package(
             url: "https://github.com/ml-explore/mlx-swift-lm.git",
             from: "3.31.0"
         ),
         // Required for the #hubDownloader() / #huggingFaceTokenizerLoader() macros
         // (Downloader + TokenizerLoader implementations + HubClient).
-        // Exact versions taken from mlx-swift-lm's own recommended consumer setup.
         .package(
             url: "https://github.com/huggingface/swift-huggingface",
             from: "0.9.0"
@@ -48,7 +47,7 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
-                // These provide the modules required by the HuggingFace integration macros
+                // These provide the modules required by the Hugging Face integration macros
                 // (HuggingFace.HubClient and Tokenizers.Tokenizer + the adaptor).
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Tokenizers", package: "swift-transformers")
@@ -60,10 +59,9 @@ let package = Package(
             dependencies: ["SaturnMLXMesh"],
             path: "Tests/SaturnMLXMeshTests"
         ),
-        // Opt-in hardware smoke test / executable.
-        // Never depended on by the test target, so `swift test` and normal CI
-        // continue to use only the _enableTestSuccessSimulation hook (no model downloads).
-        // Run manually on Apple Silicon with: swift run SaturnMLXMeshSmoke
+        // Opt-in hardware acceptance executable. It is never depended on by the
+        // test target, so ordinary `swift test` / CI remains deterministic and
+        // does not download model weights.
         .executableTarget(
             name: "SaturnMLXMeshSmoke",
             dependencies: ["SaturnMLXMesh"],
