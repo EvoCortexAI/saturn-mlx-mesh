@@ -2,6 +2,12 @@
 
 **Status:** Stable library adapter surface defined; real MLX path available; service implementation lives in `saturn-node`
 
+## Toolchain and platform contract
+
+`saturn-mlx-mesh` uses Swift tools **6.3** with deployment floors of **macOS 26** and **iOS 26**. The package baseline intentionally matches the current Saturn-Node macOS 26 toolchain so the Node does not consume a dependency compiled against an older platform contract.
+
+Normal CI remains deterministic and weight-free. Real model execution is an explicit Apple Silicon hardware gate described in `ACCEPTANCE-MODEL.md`.
+
 ## Decision
 
 `saturn-mlx-mesh` is an in-process MLX inference library. A separate `saturn-node` service owns workload authentication, network transport, model allowlisting, quotas, service lifecycle, and operational recovery.
@@ -37,7 +43,7 @@ public protocol MLXInferenceRuntime: Sendable {
 | Type | Purpose |
 |------|--------|
 | `SimulatedMLXInferenceRuntime` | Deterministic CI / unit tests. **No weights.** |
-| `MeshModelInferenceRuntime` | **Real MLX.** Loads `MeshModel` via `MeshSession`, streams tokens. |
+| `MeshModelInferenceRuntime` | **Real MLX.** Loads `MeshModel` via `MeshSession`, streams tokens, and provides cooperative cancellation. |
 
 ```swift
 // Real path (Apple Silicon, downloads/caches weights):
@@ -54,17 +60,28 @@ Supporting types: `InferenceRequestID`, `ValidatedInferenceRequest`, `InferenceC
 - `AcceptanceModelPin.primaryModelID` → `mlx-community/Qwen3-8B-4bit`
 - Procedure: [`ACCEPTANCE-MODEL.md`](ACCEPTANCE-MODEL.md)
 
+The package hardware executable now tests the same `MLXInferenceRuntime` implementation used by Saturn-Node:
+
+```sh
+swift run SaturnMLXMeshSmoke
+swift run SaturnMLXMeshSmoke --cancel-recovery
+```
+
+The first command verifies real load + streamed completion and reports timing metadata. The second additionally requires cancellation and a subsequent successful request. Generated content is suppressed by default.
+
 ## Compute credential boundary
 
 Saturn-Node validates a short-lived credential before calling the library. The library does not parse credentials, open listeners, or decide authorization.
 
 ## Cancellation
 
-Cancellation must propagate to the library `cancel(requestID:)` and stop active generation. `MeshModel` token loops respect `Task.isCancelled`. Exactly one terminal chunk; subsequent request must succeed.
+Cancellation must propagate to the library `cancel(requestID:)` and stop active generation. `MeshModel` token loops respect `Task.isCancelled`. Exactly one terminal chunk is required, request-owned active state must be cleared, and a subsequent request must succeed.
+
+The mesh hardware smoke can prove those library-level properties. Managed service restart, client disconnect propagation, authenticated transport, and resource governance remain Saturn-Node acceptance gates.
 
 ## Telemetry
 
-Metadata-only (`AdapterTelemetryRecord`). No prompt or response bodies in standard records.
+`AdapterTelemetryRecord` remains metadata-only. Standard telemetry and acceptance artifacts must not contain prompt or generated-response bodies.
 
 ## Explicit non-goals
 
