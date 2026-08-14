@@ -69,6 +69,15 @@ The library does not receive:
 
 A production implementation that drives a loaded `MeshModel` may be added later behind the same protocol. Real-hardware acceptance remains gated by issue #1.
 
+### Acceptance model pin
+
+Primary KF / mesh#1 model identity:
+
+- `AcceptanceModelPin.primaryModelID` → `mlx-community/Qwen3-8B-4bit`
+- Procedure and evidence requirements: [`ACCEPTANCE-MODEL.md`](ACCEPTANCE-MODEL.md)
+
+Saturn-Node should allowlist this identity for the single-node gate. Default node composition remains fail-closed until Founder-gated opt-in after recorded hardware evidence.
+
 ## Compute credential boundary
 
 Saturn-Node validates a short-lived credential before calling the library. Its effective scope includes:
@@ -181,4 +190,4 @@ The `saturn-node` repository tests:
 - user approval;
 - public API compatibility;
 - automatic fleet scheduling;
-- real-hardware model pinning in this PR (see issue #1).
+- claiming mesh#1 closed without recorded hardware evidence (see issue #1 and `ACCEPTANCE-MODEL.md`).
