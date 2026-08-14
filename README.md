@@ -107,6 +107,18 @@ flowchart LR
 
 The immediate priority is one repeatable, real-hardware inference path on Saturn-Node-01.
 
+### Acceptance model pin (KF primary)
+
+| Field | Value |
+|-------|--------|
+| Primary model | `mlx-community/Qwen3-8B-4bit` |
+| Code | `AcceptanceModelPin.primaryModelID` |
+| Doc | [`Docs/ACCEPTANCE-MODEL.md`](Docs/ACCEPTANCE-MODEL.md) |
+
+This is the **selected** primary model identity for mesh#1 and the Keiretsu Forum single-path demo. It is **not** automatic closure of hardware acceptance. Closing mesh#1 still requires recorded load/stream/cancel/restart evidence on target Apple Silicon.
+
+**Out of primary path before that gate:** Qwen 32B-class models (optional second-slide only), multi-model product support, distributed graph expansion.
+
 ### Acceptance sequence
 
 1. Pin one MLX runtime revision and model manifest after checking target hardware.
@@ -116,8 +128,6 @@ The immediate priority is one repeatable, real-hardware inference path on Saturn
 5. Verify managed Saturn-Node restart followed by successful inference.
 6. Record model, runtime, node, timing, token-count, resource, and outcome metadata without prompt or response content.
 7. Repeat a fixed acceptance set before expanding graph, placement, speculative, or episodic-memory behavior.
-
-`mlx-community/Qwen3-8B-4bit` is an existing smoke-test candidate, not a release commitment.
 
 ### Deferred
 
@@ -139,7 +149,7 @@ let mesh = MeshSession(
 )
 
 let model = try await mesh.loadModel(
-    id: "mlx-community/Qwen3-8B-4bit",
+    id: AcceptanceModelPin.primaryModelID,
     role: .primary
 )
 
@@ -165,6 +175,7 @@ This is an in-process library surface. Production model selection, workload auth
 - `MeshTelemetry` - model-load and generation records
 - graph foundation types for devices, execution units, model components, weights, and residency
 - `KVCacheManager`, `LayerBudgetAllocator`, and `EpisodeKVCache`
+- `AcceptanceModelPin` - single primary model identity for acceptance / KF
 
 The library's `controlPlane: .local` value is internal inference-library configuration. It does not mean Saturn-Control or Apple Container orchestration lives in this package.
 
@@ -199,7 +210,7 @@ The managed Saturn-Node runtime must pin and record deployed dependency revision
 
 ## Saturn-Node integration
 
-See [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md).
+See [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md) and [`Docs/ACCEPTANCE-MODEL.md`](Docs/ACCEPTANCE-MODEL.md).
 
 Saturn-Node wraps this library behind a private, workload-authenticated service boundary. The library never parses workload credentials, opens a network listener, decides user authorization/policy, or executes agent tools.
 
