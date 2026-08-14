@@ -6,6 +6,15 @@ Part of EvoIntelligenceFabric and loaded inside Saturn-Node.
 
 This package is not Saturn-Node itself. It is the in-process MLX execution library used by the private Saturn-Node inference service.
 
+## Toolchain baseline
+
+- Swift tools **6.3**
+- CI Xcode **26.6**
+- deployment floors: **macOS 26** and **iOS 26**
+- real-hardware acceptance: explicit Apple Silicon smoke only; normal CI remains weight-free
+
+The platform floor is intentionally aligned with Saturn-Node. Raising the manifest baseline does not itself constitute real-runtime acceptance; target hardware evidence is tracked separately.
+
 ## Canonical runtime path
 
 ```mermaid
@@ -119,6 +128,37 @@ This is the **selected** primary model identity for mesh#1 and the Keiretsu Foru
 
 **Out of primary path before that gate:** Qwen 32B-class models (optional second-slide only), multi-model product support, distributed graph expansion.
 
+### Real-hardware smoke
+
+The hardware executable now exercises `MeshModelInferenceRuntime`, the same library-side runtime contract consumed by Saturn-Node, rather than bypassing it through a direct low-level model call.
+
+Baseline real load + streamed completion:
+
+```sh
+swift run SaturnMLXMeshSmoke
+```
+
+Add explicit cancellation and subsequent-request recovery on the same loaded runtime:
+
+```sh
+swift run SaturnMLXMeshSmoke --cancel-recovery
+```
+
+Default output is metadata-only: model identity, load duration, time to first non-empty delta, generated delta count, generation duration, finish reason, cancellation/recovery status, and overall pass/fail. Prompt and generated response bodies are suppressed unless `--show-content` is explicitly requested for local debugging.
+
+Before recording acceptance evidence, also capture the exact repository/toolchain/dependency resolution from the target host:
+
+```sh
+git rev-parse HEAD
+swift --version
+xcodebuild -version
+sw_vers
+uname -m
+swift package show-dependencies --format json
+```
+
+See `Docs/ACCEPTANCE-MODEL.md` for the complete evidence contract. A library smoke does not prove Saturn-Node authentication, transport, service restart, or deployment readiness.
+
 ### Acceptance sequence
 
 1. Pin one MLX runtime revision and model manifest after checking target hardware.
@@ -171,6 +211,8 @@ This is an in-process library surface. Production model selection, workload auth
 
 - `MeshSession` - actor factory, local control-plane selection, and placement policy
 - `MeshModel` - actor-isolated generation, KV-cache reuse, and telemetry hooks
+- `MeshModelInferenceRuntime` - real MLX implementation of the stable Saturn-Node library adapter contract
+- `SimulatedMLXInferenceRuntime` - deterministic CI/unit-test implementation with no model downloads
 - `PlacementPolicy` and `AppleSiliconBalanced` - execution-unit decisions with explicit cost concepts
 - `MeshTelemetry` - model-load and generation records
 - graph foundation types for devices, execution units, model components, weights, and residency
@@ -181,24 +223,28 @@ The library's `controlPlane: .local` value is internal inference-library configu
 
 ## Current technical state
 
-The technical foundation includes actor-based model/session surfaces, MLX Swift LM and Hugging Face integrations, cache/research foundations, streaming/cancellation-oriented structure, telemetry, simulation support, and opt-in Apple Silicon hardware smoke support.
+The technical foundation includes actor-based model/session surfaces, MLX Swift LM and Hugging Face integrations, cache/research foundations, streaming/cancellation-oriented structure, telemetry, deterministic simulation, a real `MeshModelInferenceRuntime`, and opt-in Apple Silicon hardware acceptance support.
 
 A feature in this package is not automatically a supported Saturn product capability.
 
 ## Build and test
 
+With Xcode 26.6 / Swift 6.3 selected:
+
 ```sh
+swift package dump-package >/dev/null
 swift build
 swift test
 ```
 
-Real MLX execution requires compatible Apple Silicon. Run the opt-in hardware smoke manually on the target:
+Real MLX execution requires compatible Apple Silicon and is intentionally excluded from ordinary CI. Run the opt-in hardware commands manually on the selected target host:
 
 ```sh
 swift run SaturnMLXMeshSmoke
+swift run SaturnMLXMeshSmoke --cancel-recovery
 ```
 
-The smoke alone is insufficient. Saturn-Node must also prove workload authentication, limits, streaming, cancellation, restart, and end-to-end managed-agent behavior.
+The smoke alone is insufficient. Saturn-Node must also prove workload authentication, limits, streaming, cancellation, client-disconnect behavior, restart, and end-to-end managed-agent behavior.
 
 ## Dependencies
 
@@ -206,7 +252,7 @@ The smoke alone is insufficient. Saturn-Node must also prove workload authentica
 - `swift-huggingface`
 - `swift-transformers`
 
-The managed Saturn-Node runtime must pin and record deployed dependency revisions. A floating SwiftPM range is not a production manifest.
+The manifest uses reviewed lower-bound compatibility ranges for development. The managed Saturn-Node runtime must pin and record the exact resolved dependency revisions used for hardware acceptance and deployment. A floating SwiftPM range is not a production manifest.
 
 ## Saturn-Node integration
 

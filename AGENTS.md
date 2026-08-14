@@ -6,6 +6,15 @@ This repository is the MLX-native inference library loaded inside Saturn-Node.
 
 It is not Saturn-Node, Saturn-Control, an agent runtime, a container orchestrator, or a user-facing product.
 
+## Toolchain baseline
+
+- Swift tools: **6.3**
+- CI Xcode: **26.6**
+- Package deployment floors: **macOS 26** and **iOS 26**
+- Real-hardware MVP acceptance target: Apple Silicon macOS host used by Saturn-Node
+
+Do not lower the package deployment floors or Swift tools version without an explicit compatibility decision. Normal CI remains deterministic and must not download model weights.
+
 ## Canonical boundary
 
 ```text
@@ -21,6 +30,7 @@ Read:
 
 - `README.md`
 - `Docs/SATURN-NODE-INTEGRATION.md`
+- `Docs/ACCEPTANCE-MODEL.md`
 - canonical Saturn architecture in the Saturn-Control repository.
 
 ## Owned responsibilities
@@ -70,6 +80,19 @@ Do not expand distributed mesh, Runtime DAG, automatic scheduling, speculative r
 - Put real-hardware work in opt-in smoke targets.
 - Pin production runtime revisions in Saturn-Node, not by pretending SwiftPM ranges are deployment manifests.
 
+## Hardware acceptance
+
+The opt-in executable exercises the same `MLXInferenceRuntime` contract consumed by Saturn-Node:
+
+```sh
+swift run SaturnMLXMeshSmoke
+swift run SaturnMLXMeshSmoke --cancel-recovery
+```
+
+The first command proves real model load plus streamed completion and records timing metadata. The second additionally proves explicit cancellation and a successful subsequent request on the same loaded runtime. Generated content is suppressed unless `--show-content` is explicitly supplied.
+
+A passing smoke is necessary but not sufficient to close hardware acceptance. Record host/toolchain/dependency/model revisions and repeat from a fresh process as described in `Docs/ACCEPTANCE-MODEL.md`. Managed Saturn-Node restart and authenticated service behavior remain Node-owned gates.
+
 ## Change discipline
 
 Before editing:
@@ -84,6 +107,7 @@ Keep task diffs narrow. Preserve unrelated work. Ask before architecture changes
 After editing:
 
 ```sh
+swift package dump-package >/dev/null
 swift build
 swift test
 git diff --check

@@ -2,61 +2,243 @@
 //
 // SaturnMLXMeshSmoke
 //
-// Opt-in hardware smoke test / demo executable.
+// Opt-in real-hardware acceptance executable.
 //
-// This target is intentionally **not** depended on by the test target.
-// `swift test` (and normal CI) will continue to use the simulation hook
-// (_enableTestSuccessSimulation) and will never download model weights.
+// Ordinary `swift test` / CI never invokes this target and therefore never
+// downloads model weights. Run it only on an explicitly selected Apple Silicon
+// acceptance host.
 //
-// Run manually on Apple Silicon hardware (after `swift build` or via `swift run`):
+// Baseline completion + timing:
 //     swift run SaturnMLXMeshSmoke
 //
-// Model identity comes from `AcceptanceModelPin` (mesh#1 / KF primary).
-// Expected: real decoded tokens are streamed from a live MLX container.
-// Record load time, TTFT, tokens/sec, cancel+reclaim, and dependency pins
-// after a successful run — do not treat a single ad-hoc CLI success as closed.
+// Add explicit cancellation + subsequent-request recovery:
+//     swift run SaturnMLXMeshSmoke --cancel-recovery
+//
+// Generated content is suppressed by default so copied acceptance output stays
+// metadata-only. `--show-content` is a local debugging aid and should not be used
+// for standard evidence artifacts.
 
 import Foundation
 import SaturnMLXMesh
 
 @main
 struct SaturnMLXMeshSmoke {
+    private enum SmokeFailure: Error, CustomStringConvertible {
+        case modelNotLoaded(String)
+        case noGeneratedDeltas
+        case missingCompletion
+        case unexpectedCancellation
+        case cancellationNotObserved
+        case requestStillActive
+
+        var description: String {
+            switch self {
+            case let .modelNotLoaded(modelID):
+                return "Pinned model is not reported loaded: \(modelID)"
+            case .noGeneratedDeltas:
+                return "Real MLX stream produced no non-empty deltas"
+            case .missingCompletion:
+                return "Real MLX stream ended without a completed terminal event"
+            case .unexpectedCancellation:
+                return "Baseline completion request was cancelled unexpectedly"
+            case .cancellationNotObserved:
+                return "Cancellation probe did not observe a cancelled terminal event"
+            case .requestStillActive:
+                return "Cancelled request remained active after stream termination"
+            }
+        }
+    }
+
+    private struct CompletionMetrics {
+        let deltaCount: Int
+        let timeToFirstDelta: Duration
+        let generationDuration: Duration
+        let finishReason: InferenceFinishReason
+    }
+
     static func main() async throws {
+        let arguments = Set(CommandLine.arguments.dropFirst())
+        let showContent = arguments.contains("--show-content")
+        let runCancellationRecovery = arguments.contains("--cancel-recovery")
+
         let modelID = AcceptanceModelPin.primaryModelID
-        let prompt = AcceptanceModelPin.acceptancePrompt
-        let maxTokens = AcceptanceModelPin.smokeMaxTokens
+        let clock = ContinuousClock()
 
-        print("=== saturn-mlx-mesh real-loading smoke ===")
-        print("Control plane: .local")
-        print("Policy: .appleSiliconBalanced")
-        print("Model: \(modelID) (\(AcceptanceModelPin.primaryRole))")
-        print("Prompt: \"\(prompt)\"")
-        print("maxTokens: \(maxTokens)")
-        print("")
+        print("=== saturn-mlx-mesh hardware acceptance ===")
+        print("model_id=\(modelID)")
+        print("model_role=\(AcceptanceModelPin.primaryRole)")
+        print("max_output_tokens=\(AcceptanceModelPin.smokeMaxTokens)")
+        print("content_output=\(showContent ? "enabled" : "suppressed")")
 
-        let mesh = MeshSession(
-            controlPlane: .local,
-            policy: .appleSiliconBalanced
+        let loadStarted = clock.now
+        let runtime = try await MeshModelInferenceRuntime.loadPrimary()
+        let loadDuration = loadStarted.duration(to: clock.now)
+
+        let capabilities = try await runtime.capabilities()
+        guard capabilities.models.contains(where: {
+            $0.modelID == modelID && $0.isLoaded
+        }) else {
+            throw SmokeFailure.modelNotLoaded(modelID)
+        }
+
+        print("load_ms=\(milliseconds(loadDuration))")
+        print("runtime_state=\(capabilities.state.rawValue)")
+        print("maximum_concurrent_requests=\(capabilities.maximumConcurrentRequests)")
+
+        let baseline = try await runCompletion(
+            runtime: runtime,
+            requestID: InferenceRequestID("hardware-baseline-\(UUID().uuidString)"),
+            showContent: showContent
         )
 
-        let model = try await mesh.loadModel(
-            id: modelID,
-            role: .primary
-        )
+        print("baseline_result=pass")
+        print("baseline_delta_count=\(baseline.deltaCount)")
+        print("baseline_ttfd_ms=\(milliseconds(baseline.timeToFirstDelta))")
+        print("baseline_generation_ms=\(milliseconds(baseline.generationDuration))")
+        print("baseline_finish_reason=\(baseline.finishReason.rawValue)")
 
-        let stream = try await model.generate(
-            prompt: prompt,
-            maxTokens: maxTokens,
+        if runCancellationRecovery {
+            try await runCancellationProbe(runtime: runtime, showContent: showContent)
+
+            let recovery = try await runCompletion(
+                runtime: runtime,
+                requestID: InferenceRequestID("hardware-recovery-\(UUID().uuidString)"),
+                showContent: showContent
+            )
+
+            print("cancel_recovery_result=pass")
+            print("recovery_delta_count=\(recovery.deltaCount)")
+            print("recovery_ttfd_ms=\(milliseconds(recovery.timeToFirstDelta))")
+            print("recovery_generation_ms=\(milliseconds(recovery.generationDuration))")
+            print("recovery_finish_reason=\(recovery.finishReason.rawValue)")
+        }
+
+        let telemetry = await runtime.telemetrySnapshot()
+        print("telemetry_records=\(telemetry.count)")
+        print("result=pass")
+    }
+
+    private static func runCompletion(
+        runtime: MeshModelInferenceRuntime,
+        requestID: InferenceRequestID,
+        showContent: Bool
+    ) async throws -> CompletionMetrics {
+        let request = ValidatedInferenceRequest(
+            requestID: requestID,
+            modelID: AcceptanceModelPin.primaryModelID,
+            prompt: AcceptanceModelPin.acceptancePrompt,
+            maxOutputTokens: AcceptanceModelPin.smokeMaxTokens,
             temperature: 0.7
         )
 
-        print("Tokens: ", terminator: "")
-        for try await token in stream {
-            print(token.text, terminator: "")
-            fflush(stdout)
+        let clock = ContinuousClock()
+        let started = clock.now
+        var firstDeltaAt: ContinuousClock.Instant?
+        var deltaCount = 0
+        var finishReason: InferenceFinishReason?
+
+        let stream = runtime.generate(request)
+        for try await chunk in stream {
+            switch chunk {
+            case .started:
+                break
+            case let .delta(_, text, _):
+                guard !text.isEmpty else { continue }
+                if firstDeltaAt == nil {
+                    firstDeltaAt = clock.now
+                }
+                deltaCount += 1
+                if showContent {
+                    print(text, terminator: "")
+                    fflush(stdout)
+                }
+            case let .completed(_, reason):
+                if reason == .cancelled {
+                    throw SmokeFailure.unexpectedCancellation
+                }
+                finishReason = reason
+            case .cancelled:
+                throw SmokeFailure.unexpectedCancellation
+            }
         }
-        print("\n")
-        print("Smoke completed successfully (real tokens received).")
-        print("Next: record timings + dependency pins into mesh#1 acceptance notes.")
+
+        if showContent {
+            print("")
+        }
+
+        guard deltaCount > 0, let firstDeltaAt else {
+            throw SmokeFailure.noGeneratedDeltas
+        }
+        guard let finishReason else {
+            throw SmokeFailure.missingCompletion
+        }
+
+        return CompletionMetrics(
+            deltaCount: deltaCount,
+            timeToFirstDelta: started.duration(to: firstDeltaAt),
+            generationDuration: started.duration(to: clock.now),
+            finishReason: finishReason
+        )
+    }
+
+    private static func runCancellationProbe(
+        runtime: MeshModelInferenceRuntime,
+        showContent: Bool
+    ) async throws {
+        let requestID = InferenceRequestID("hardware-cancel-\(UUID().uuidString)")
+        let request = ValidatedInferenceRequest(
+            requestID: requestID,
+            modelID: AcceptanceModelPin.primaryModelID,
+            prompt: AcceptanceModelPin.acceptancePrompt,
+            maxOutputTokens: max(AcceptanceModelPin.smokeMaxTokens, 64),
+            temperature: 0.7
+        )
+
+        var cancellationRequested = false
+        var cancellationObserved = false
+        let stream = runtime.generate(request)
+
+        for try await chunk in stream {
+            switch chunk {
+            case .started:
+                break
+            case let .delta(_, text, _):
+                if showContent, !text.isEmpty {
+                    print(text, terminator: "")
+                    fflush(stdout)
+                }
+                if !cancellationRequested {
+                    cancellationRequested = true
+                    await runtime.cancel(requestID: requestID)
+                }
+            case let .completed(_, reason):
+                if reason == .cancelled {
+                    cancellationObserved = true
+                }
+            case .cancelled:
+                cancellationObserved = true
+            }
+        }
+
+        if showContent {
+            print("")
+        }
+
+        guard cancellationRequested, cancellationObserved else {
+            throw SmokeFailure.cancellationNotObserved
+        }
+        let activeRequestIDs = await runtime.activeRequestIDs()
+        guard activeRequestIDs.isEmpty else {
+            throw SmokeFailure.requestStillActive
+        }
+
+        print("cancel_result=pass")
+    }
+
+    private static func milliseconds(_ duration: Duration) -> String {
+        let components = duration.components
+        let value = Double(components.seconds) * 1_000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+        return String(format: "%.3f", value)
     }
 }
