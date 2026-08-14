@@ -153,6 +153,9 @@ struct SaturnMLXMeshSmoke {
                     fflush(stdout)
                 }
             case let .completed(_, reason):
+                if reason == .cancelled {
+                    throw SmokeFailure.unexpectedCancellation
+                }
                 finishReason = reason
             case .cancelled:
                 throw SmokeFailure.unexpectedCancellation
@@ -224,7 +227,8 @@ struct SaturnMLXMeshSmoke {
         guard cancellationRequested, cancellationObserved else {
             throw SmokeFailure.cancellationNotObserved
         }
-        guard await runtime.activeRequestIDs().isEmpty else {
+        let activeRequestIDs = await runtime.activeRequestIDs()
+        guard activeRequestIDs.isEmpty else {
             throw SmokeFailure.requestStillActive
         }
 
