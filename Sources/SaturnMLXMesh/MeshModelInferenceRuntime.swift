@@ -140,9 +140,9 @@ public actor MeshModelInferenceRuntime: MLXInferenceRuntime {
             return
         }
         session.task.cancel()
+        terminalIDs.insert(requestID)
         session.continuation.yield(.cancelled(requestID: requestID))
         session.continuation.finish()
-        terminalIDs.insert(requestID)
         let duration = Date().timeIntervalSince(session.startedAt)
         await telemetry.record(
             AdapterTelemetryRecord(
@@ -167,7 +167,6 @@ public actor MeshModelInferenceRuntime: MLXInferenceRuntime {
         }
 
         if request.modelID != modelID {
-            continuation.finish(throwing: MeshInferenceError.modelUnavailable(request.modelID))
             terminalIDs.insert(request.requestID)
             await telemetry.record(
                 AdapterTelemetryRecord(
@@ -178,11 +177,11 @@ public actor MeshModelInferenceRuntime: MLXInferenceRuntime {
                     duration: 0
                 )
             )
+            continuation.finish(throwing: MeshInferenceError.modelUnavailable(request.modelID))
             return
         }
 
         if active.count >= maximumConcurrentRequests {
-            continuation.finish(throwing: MeshInferenceError.capacityExhausted)
             terminalIDs.insert(request.requestID)
             await telemetry.record(
                 AdapterTelemetryRecord(
@@ -193,6 +192,7 @@ public actor MeshModelInferenceRuntime: MLXInferenceRuntime {
                     duration: 0
                 )
             )
+            continuation.finish(throwing: MeshInferenceError.capacityExhausted)
             return
         }
 
@@ -261,41 +261,50 @@ public actor MeshModelInferenceRuntime: MLXInferenceRuntime {
 
             let reason: InferenceFinishReason =
                 generated >= maxTokens ? .length : .stop
-            continuation.yield(
-                .completed(requestID: request.requestID, finishReason: reason)
-            )
-            continuation.finish()
+
+            // Remove request-owned state before finishing the continuation. The
+            // stream's onTermination callback also runs for normal finish; if we
+            // finished first, it could race and misclassify a completed request as
+            // consumer-cancelled or emit duplicate telemetry.
             await markTerminal(
                 requestID: request.requestID,
                 outcome: reason == .length ? "length" : "completed",
                 count: generated,
                 startedAt: startedAt
             )
+            continuation.yield(
+                .completed(requestID: request.requestID, finishReason: reason)
+            )
+            continuation.finish()
         } catch is CancellationError {
-            // cancel(requestID:) owns terminal chunk when it raced us.
+            // cancel(requestID:) owns the terminal chunk when it raced us.
             if !terminalIDs.contains(request.requestID) {
-                continuation.yield(.cancelled(requestID: request.requestID))
-                continuation.finish()
+                let generated = active[request.requestID]?.generatedCount ?? 0
                 await markTerminal(
                     requestID: request.requestID,
                     outcome: "cancelled",
-                    count: active[request.requestID]?.generatedCount ?? 0,
+                    count: generated,
                     startedAt: startedAt
                 )
+                continuation.yield(.cancelled(requestID: request.requestID))
+                continuation.finish()
             }
         } catch {
-            continuation.finish(
-                throwing: MeshInferenceError.generationFailed(String(describing: error))
-            )
+            let generated = active[request.requestID]?.generatedCount ?? 0
             await markTerminal(
                 requestID: request.requestID,
                 outcome: "failed",
-                count: active[request.requestID]?.generatedCount ?? 0,
+                count: generated,
                 startedAt: startedAt
+            )
+            continuation.finish(
+                throwing: MeshInferenceError.generationFailed(String(describing: error))
             )
         }
     }
 
+    /// Mark the request terminal before any continuation finish so normal stream
+    /// termination cannot race with `consumerTerminated` and overwrite its outcome.
     private func markTerminal(
         requestID: InferenceRequestID,
         outcome: String,
