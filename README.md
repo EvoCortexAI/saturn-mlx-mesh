@@ -4,6 +4,8 @@
 
 Part of EvoIntelligenceFabric and loaded inside Saturn-Node.
 
+**Current development license:** Apache License 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
 This package is not Saturn-Node itself. It is the in-process MLX execution library used by the private Saturn-Node inference service.
 
 ## Toolchain baseline
@@ -283,6 +285,12 @@ After the single-node gate is reliable:
 
 Long-term work must remain separable from the stable Saturn-Node inference contract.
 
-## License and copyright
+## License
 
-Copyright © 2026 EvoCortexAI S.L. All rights reserved.
+Current `main` first-party materials are offered under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
+
+Changelog version `0.1.0` remains under the proprietary terms present when that section was recorded. The next published semantic release is the first Apache-2.0 release. Do not treat prior private snapshots as Apache-2.0 publication.
+
+Third-party software remains under its own terms. This license does not grant trademark rights in Saturn, saturn-mlx-mesh, EvoIntelligenceFabric, or EvoCortexAI except as required for reasonable attribution.
+
+This change licenses current development source; it does not by itself make the GitHub repository public.
