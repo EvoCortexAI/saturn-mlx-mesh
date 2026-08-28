@@ -1,5 +1,10 @@
 # Releasing saturn-mlx-mesh
 
+**Type:** release-procedure
+**Status:** binding-after-merge; published-tag-pending for `0.2.0`
+**Authority:** procedure only; merge of this file does not create a tag
+**Schema:** Docs/MARKDOWN-SCHEMA.md
+
 saturn-mlx-mesh is released as a versioned Swift package. A release is a compatibility and provenance boundary, not merely a Git tag.
 
 Merging documentation or feature work does not itself authorize or create a release.
