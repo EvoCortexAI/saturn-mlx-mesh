@@ -2,6 +2,8 @@
 
 **Status:** Stable library adapter surface defined; real MLX path available; service implementation lives in `saturn-node`
 
+Architecture views: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## Toolchain and platform contract
 
 `saturn-mlx-mesh` uses Swift tools **6.3** with deployment floors of **macOS 26** and **iOS 26**. The package baseline intentionally matches the current Saturn-Node macOS 26 toolchain so the Node does not consume a dependency compiled against an older platform contract.
@@ -11,6 +13,18 @@ Normal CI remains deterministic and weight-free. Real model execution is an expl
 ## Decision
 
 `saturn-mlx-mesh` is an in-process MLX inference library. A separate `saturn-node` service owns workload authentication, network transport, model allowlisting, quotas, service lifecycle, and operational recovery.
+
+```mermaid
+flowchart LR
+    Agent[Agent container]
+    Cred[short-lived compute credential]
+    Node[Saturn-Node service]
+    Adapter[MLXInferenceRuntime]
+    Mesh[SaturnMLXMesh]
+    MLX[MLX]
+
+    Agent --> Cred --> Node --> Adapter --> Mesh --> MLX
+```
 
 ```text
 Agent container
@@ -44,6 +58,18 @@ public protocol MLXInferenceRuntime: Sendable {
 |------|--------|
 | `SimulatedMLXInferenceRuntime` | Deterministic CI / unit tests. **No weights.** |
 | `MeshModelInferenceRuntime` | **Real MLX.** Loads `MeshModel` via `MeshSession`, streams tokens, and provides cooperative cancellation. |
+
+```mermaid
+flowchart TB
+    Proto[MLXInferenceRuntime]
+    Sim[SimulatedMLXInferenceRuntime]
+    Real[MeshModelInferenceRuntime]
+    Session[MeshSession]
+    Model[MeshModel]
+
+    Proto --> Sim
+    Proto --> Real --> Session --> Model
+```
 
 ```swift
 // Real path (Apple Silicon, downloads/caches weights):
