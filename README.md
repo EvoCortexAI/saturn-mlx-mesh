@@ -8,6 +8,8 @@ Part of EvoIntelligenceFabric and loaded inside Saturn-Node.
 
 This package is not Saturn-Node itself. It is the in-process MLX execution library used by the private Saturn-Node inference service.
 
+Architecture flowcharts: [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md).
+
 ## Toolchain baseline
 
 - Swift tools **6.3**
@@ -258,7 +260,7 @@ The manifest uses reviewed lower-bound compatibility ranges for development. The
 
 ## Saturn-Node integration
 
-See [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md) and [`Docs/ACCEPTANCE-MODEL.md`](Docs/ACCEPTANCE-MODEL.md).
+See [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md), [`Docs/ACCEPTANCE-MODEL.md`](Docs/ACCEPTANCE-MODEL.md), and [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md).
 
 Saturn-Node wraps this library behind a private, workload-authenticated service boundary. The library never parses workload credentials, opens a network listener, decides user authorization/policy, or executes agent tools.
 
