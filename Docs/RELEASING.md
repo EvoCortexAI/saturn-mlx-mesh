@@ -5,9 +5,25 @@
 **Authority:** procedure only; merge of this file does not create a tag
 **Schema:** Docs/MARKDOWN-SCHEMA.md
 
+Architecture views: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 saturn-mlx-mesh is released as a versioned Swift package. A release is a compatibility and provenance boundary, not merely a Git tag.
 
 Merging documentation or feature work does not itself authorize or create a release.
+
+```mermaid
+flowchart TD
+    A[Choose 0.x.y] --> B[Update CHANGELOG + Docs/releases]
+    B --> C[Merge prep PR to main]
+    C --> D[Record exact main SHA]
+    D --> E[CI green on that SHA]
+    E --> F{Founder approves version + SHA?}
+    F -->|no| G[Stop. No tag]
+    F -->|yes| H[Tag bare semver on that SHA]
+    H --> I[GitHub release records SHA]
+    I --> J[Verify tag resolves to SHA]
+    J --> K[Separate Node PR drops revision pin]
+```
 
 ## Release authority
 
