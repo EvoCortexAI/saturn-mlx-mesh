@@ -2,7 +2,7 @@
 
 All notable changes to `saturn-mlx-mesh` will be documented in this file.
 
-Versioning follows semantic-style `0.x.y` while the package remains in early development. See `Docs/VERSIONING.md` and `Docs/RELEASING.md`.
+Versioning follows semantic-style `0.x.y` while the package remains in early development. See `Docs/VERSIONING.md`, `Docs/RELEASING.md`, and `Docs/MARKDOWN-SCHEMA.md`.
 
 Keep active work in `Unreleased`, then promote to a dated release section when cutting a version. A changelog section is not a published tag.
 
