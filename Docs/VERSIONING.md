@@ -1,5 +1,10 @@
 # Versioning
 
+**Type:** versioning-policy
+**Status:** binding-after-merge; published-tag-pending for `0.2.0`
+**Authority:** compatibility contract only; this file is not a Git tag
+**Schema:** Docs/MARKDOWN-SCHEMA.md
+
 ## Principle
 
 saturn-mlx-mesh uses semantic versions as the consumer-facing dependency contract for Saturn-Node.
