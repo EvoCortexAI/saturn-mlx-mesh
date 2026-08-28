@@ -11,7 +11,8 @@ This file is the schema for saturn-mlx-mesh markdown that talks about versions. 
 | Path | Type | Role |
 |------|------|------|
 | `README.md` | overview | Product boundary and how to build. Not a release. |
-| `CHANGELOG.md` | changelog | Keep a Change. Dated sections are history, not tags. |
+| `CHANGELOG.md` | changelog | Keep a Changelog. Dated sections are history, not tags. |
+| `Docs/ARCHITECTURE.md` | architecture | Mermaid flowcharts for plane, firewall, path, version identity, release. |
 | `Docs/VERSIONING.md` | versioning-policy | Compatibility contract. What `0.x.y` means. |
 | `Docs/RELEASING.md` | release-procedure | How a tag is created. Merge does not tag. |
 | `Docs/releases/<x.y.z>.md` | release-record | Prep notes for one intended version. Not the tag. |
@@ -21,6 +22,19 @@ This file is the schema for saturn-mlx-mesh markdown that talks about versions. 
 | `Docs/mesh-llm-mlx-extension.md` | research-note | Not part of the `0.2.x` Node contract. |
 
 Do not add a second `docs/` directory. All package docs live under `Docs/`.
+
+```mermaid
+flowchart TB
+    Schema[MARKDOWN-SCHEMA]
+    Arch[ARCHITECTURE]
+    Ver[VERSIONING]
+    Rel[RELEASING]
+    Rec[releases/x.y.z]
+    Log[CHANGELOG]
+
+    Schema --> Arch
+    Schema --> Ver --> Rel --> Rec --> Log
+```
 
 ## Required header
 
@@ -37,7 +51,28 @@ Every version/release markdown file starts with:
 
 `CHANGELOG.md` is exempt from the four-line header. It uses Keep a Changelog section titles only.
 
+An optional one-line pointer to `ARCHITECTURE.md` may sit immediately after the header.
+
+## Mermaid
+
+Architecture diagrams use GitHub-flavored `mermaid` `flowchart` blocks (`LR`, `TB`, or `TD`). They illustrate boundaries. They do not authorize tags, listeners, or deploys.
+
+Canonical diagrams live in `Docs/ARCHITECTURE.md`. Other files may repeat a single focused chart; they must not invent a second runtime path.
+
 ## Type schemas
+
+### `architecture` (`Docs/ARCHITECTURE.md`)
+
+Required sections, in order:
+
+1. Saturn execution plane
+2. Package firewall
+3. In-process inference path
+4. Version identity
+5. Release procedure
+6. Doc architecture
+
+Each section contains one `flowchart`.
 
 ### `versioning-policy` (`Docs/VERSIONING.md`)
 
@@ -135,6 +170,7 @@ Package.resolved   == what Node actually builds
 
 | File | Type | Header | Sections |
 |------|------|--------|----------|
+| `Docs/ARCHITECTURE.md` | architecture | required | six flowchart sections |
 | `Docs/VERSIONING.md` | versioning-policy | required | six named sections |
 | `Docs/RELEASING.md` | release-procedure | required | six named sections |
 | `Docs/releases/0.2.0.md` | release-record | required | eight named sections |
