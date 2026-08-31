@@ -13,7 +13,148 @@ concurrency:
   group: saturn-mlx-mesh-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Public saturn-mlx-mesh cannot resolve reusable workflows in private
+# EvoCortexAI/ci-platform ("workflow was not found"). Keep the same
+# self-hosted Apple lane and steps as swift-package-ci.yml@aa8bca78.
+# Linux is policy-only. Swift/MLX/Metal stay on the Apple lane.
 jobs:
+  linux-policy:
+    name: Linux deploy policy
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, ARM64, saturn, apple-container]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify Linux runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == "Linux" ]] || {
+            echo "Expected RUNNER_OS=Linux, got: $RUNNER_OS"
+            exit 1
+          }
+          [[ "$RUNNER_ARCH" == "ARM64" ]] || {
+            echo "Expected RUNNER_ARCH=ARM64, got: $RUNNER_ARCH"
+            exit 1
+          }
+          case "$(uname -m)" in
+            arm64|aarch64) ;;
+            *) echo "Expected an ARM64 Linux guest"; uname -a; exit 1 ;;
+          esac
+          python3 --version
+
+      - name: Verify checkout is initially clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Reject Linux inference deploy artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)Dockerfile$|(^|/)docker-compose' >/dev/null; then
+            echo "Mesh has no Linux inference image. Do not add a Dockerfile without a reviewed deploy ADR."
+            exit 1
+          fi
+          grep -F '.macOS(.v26)' Package.swift
+          grep -F '.iOS(.v26)' Package.swift
+          grep -F 'mlx-swift-lm.git' Package.swift
+          ! grep -E '\.linux\(|\.vLinux' Package.swift
+
+      - name: Clean checked-out workspace
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          repository_root="$(git rev-parse --show-toplevel)"
+          [[ "$workspace" == "$repository_root" ]] || {
+            echo "Refusing cleanup outside the checked-out repository"
+            exit 1
+          }
+          git reset --hard HEAD
+          git clean -ffdx
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
   package:
     name: Swift Package
-    uses: EvoCortexAI/ci-platform/.github/workflows/swift-package-ci.yml@aa8bca785e33d4cb81709e785841d21d3697d774
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, macOS, ARM64, apple-ci, xcode-26-6]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify self-hosted runner and Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$RUNNER_OS" == "macOS" ]] || {
+            echo "Expected RUNNER_OS=macOS, got: $RUNNER_OS"
+            exit 1
+          }
+          [[ "$RUNNER_ARCH" == "ARM64" ]] || {
+            echo "Expected RUNNER_ARCH=ARM64, got: $RUNNER_ARCH"
+            exit 1
+          }
+
+          xcode_version="$(xcodebuild -version | sed -n '1s/^Xcode //p')"
+          [[ "$xcode_version" == "26.6" ]] || {
+            echo "Expected Xcode 26.6, got: ${xcode_version:-unknown}"
+            xcodebuild -version
+            exit 1
+          }
+
+      - name: Verify checkout is initially clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Reject tracked generated and credential artifacts
+        run: |
+          set -euo pipefail
+          tracked="$(git ls-files | grep -E '(^|/)(DerivedData|xcuserdata|\.build|build|node_modules)(/|$)|\.xcuserstate$|\.(pem|key|p12|mobileprovision)$' || true)"
+          if [[ -n "$tracked" ]]; then printf '%s\n' "$tracked"; exit 1; fi
+
+      - name: Validate package manifest
+        run: swift package dump-package >/dev/null
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Clean checked-out workspace
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          repository_root="$(git rev-parse --show-toplevel)"
+          [[ "$workspace" == "$repository_root" ]] || {
+            echo "Refusing cleanup outside the checked-out repository"
+            exit 1
+          }
+
+          git reset --hard HEAD
+          git clean -ffdx
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"

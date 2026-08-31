@@ -1,9 +1,3 @@
-// Copyright © 2026 EvoCortexAI S.L. All rights reserved.
-//
-// SaturnNodeAdapterTests.swift
-// Simulation-backed tests for the stable Saturn-Node adapter surface.
-// No model downloads, no SN01 hardware, no network.
-
 import XCTest
 @testable import SaturnMLXMesh
 
@@ -30,6 +24,20 @@ final class SaturnNodeAdapterTests: XCTestCase {
             chunks.append(chunk)
         }
         return chunks
+    }
+
+    func testPrimaryAcceptancePinIsQwen3_8B_4bit() {
+        XCTAssertEqual(AcceptanceModelPin.primaryModelID, "mlx-community/Qwen3-8B-4bit")
+        XCTAssertEqual(AcceptanceModelPin.primaryRole, "kf-primary-acceptance")
+        XCTAssertGreaterThan(AcceptanceModelPin.smokeMaxTokens, 0)
+        XCTAssertFalse(AcceptanceModelPin.primaryModelID.contains("32B"))
+    }
+
+    func testNodeContractSurfaceStaysCapabilitiesGenerateCancel() {
+        let runtime: any MLXInferenceRuntime = SimulatedMLXInferenceRuntime()
+        _ = runtime
+        XCTAssertTrue(InferenceChunk.started(requestID: InferenceRequestID("x")).isTerminal == false)
+        XCTAssertTrue(InferenceChunk.cancelled(requestID: InferenceRequestID("x")).isTerminal)
     }
 
     func testNormalMultiChunkCompletion() async throws {
