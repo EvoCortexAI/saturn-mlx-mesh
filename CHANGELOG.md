@@ -11,6 +11,7 @@ Keep active work in `Unreleased`, then promote to a dated release section when c
 - Lock `AcceptanceModelPin.primaryModelID` and the `MLXInferenceRuntime` surface in adapter tests.
 - Compress README to the `0.2.x` Node contract; research graph remains in-tree and out of contract.
 - Graph, placement, Runtime DAG, speculative, and episodic-memory research remains in-tree and is not part of the `0.2.x` Saturn-Node adapter contract.
+- Inline Swift package CI. Public mesh cannot resolve private `ci-platform` reusable workflows.
 
 ## [0.2.0] - 2026-08-28
 
