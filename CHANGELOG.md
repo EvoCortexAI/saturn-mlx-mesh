@@ -8,11 +8,13 @@ Keep active work in `Unreleased`, then promote to a dated release section when c
 
 ## [Unreleased]
 
+- Lock `AcceptanceModelPin.primaryModelID` and the `MLXInferenceRuntime` surface in adapter tests.
+- Compress README to the `0.2.x` Node contract; research graph remains in-tree and out of contract.
 - Graph, placement, Runtime DAG, speculative, and episodic-memory research remains in-tree and is not part of the `0.2.x` Saturn-Node adapter contract.
 
 ## [0.2.0] - 2026-08-28
 
-First published semantic release. First Apache-2.0 tagged release. Tag is created only after this section lands on `main` and founder approval records the exact SHA.
+First published semantic release. First Apache-2.0 tagged release. Tag SHA `9aab96a2e24817fbb1898f8c133ad44469986805`.
 
 - Swift tools 6.3 / macOS 26 / iOS 26 baseline aligned with Saturn-Node.
 - Stable Node adapter: `MLXInferenceRuntime`, `MeshModelInferenceRuntime`, `SimulatedMLXInferenceRuntime`.
