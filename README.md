@@ -3,7 +3,8 @@
 In-process MLX library loaded by Saturn-Node. Not a service. No listener, credentials, or orchestration.
 
 **License:** Apache License 2.0 ([`LICENSE`](LICENSE), [`NOTICE`](NOTICE))  
-**Tag:** `0.2.0` @ `9aab96a2e24817fbb1898f8c133ad44469986805`
+**Tag:** `0.2.0` @ `9aab96a2e24817fbb1898f8c133ad44469986805`  
+**Cueing:** `0.2.x` after green main CI, starting at `0.2.1`. See [`Docs/VERSIONING.md`](Docs/VERSIONING.md).
 
 Diagrams: [`Docs/ARCHITECTURE.md`](Docs/ARCHITECTURE.md). Node seam: [`Docs/SATURN-NODE-INTEGRATION.md`](Docs/SATURN-NODE-INTEGRATION.md).
 
@@ -44,4 +45,4 @@ swift build
 swift test
 ```
 
-Node consumes this package with `.upToNextMinor(from: "0.2.0")`. A floating `branch: "main"` pin is not a release contract.
+Node consumes this package with `.upToNextMinor(from: "0.2.0")`. After each new `0.2.x` cue, run `swift package update saturn-mlx-mesh` and commit `Package.resolved`. A floating `branch: "main"` pin is not a release contract.
