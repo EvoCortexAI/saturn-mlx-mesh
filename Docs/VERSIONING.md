@@ -1,7 +1,7 @@
 # Versioning
 
 **Type:** versioning-policy
-**Status:** binding-after-merge; published-tag-pending for `0.2.0`
+**Status:** binding; `0.2.0` published; `0.2.x` cueing after green main CI
 **Authority:** compatibility contract only; this file is not a Git tag
 **Schema:** Docs/MARKDOWN-SCHEMA.md
 
@@ -20,66 +20,51 @@ commit SHA       = source provenance
 Package.resolved = exact consumer resolution
 ```
 
-```mermaid
-flowchart LR
-    Semver["0.2.0 contract"] --> Tag["Git tag 0.2.0"]
-    Tag --> SHA[commit SHA]
-    SHA --> Resolved[Node Package.resolved]
-
-    Log[CHANGELOG section] -. is not .-> Tag
-    Notes[Docs/releases/0.2.0.md] -. is not .-> Tag
-    Branch["branch main"] -. not a consumer pin .-> Resolved
-```
-
 Do not use a floating branch as a Node dependency. Do not retarget a released version tag.
 
 The operational release procedure is defined in `RELEASING.md`.
 
 ## Current release line
 
-Changelog section `0.1.0` (2026-06-12) records the original private skeleton. That section is not a published Git tag on current `main` and remains under the proprietary terms present when it was written.
+Changelog section `0.1.0` (2026-06-12) records the original private skeleton. That section is not a published Git tag on current `main` and remains under the proprietary terms present when it was written. Do not tag current Apache-2.0 `main` as `0.1.0`.
 
-The first published semantic release is `0.2.0`. It is the first Apache-2.0 tagged release. The active pre-1.0 compatibility line after publication is `0.2.x`.
+The first published semantic release is `0.2.0`. It is the first Apache-2.0 tagged release. The active pre-1.0 compatibility and development-cueing line is `0.2.x`.
 
-Hardware acceptance evidence for `mlx-community/Qwen3-8B-4bit` was gathered at provenance SHA `8ce1d6f6d6f5304f526019a5b5bcbf3f2b2f783e`. `0.2.0` is that adapter/runtime surface plus subsequent Apache-2.0 relicensing on `main`. Relicensing does not reopen the hardware gate.
+Hardware acceptance evidence for `mlx-community/Qwen3-8B-4bit` was gathered at provenance SHA `8ce1d6f6d6f5304f526019a5b5bcbf3f2b2f783e`. `0.2.0` is that adapter/runtime surface plus subsequent Apache-2.0 relicensing on `main`. Relicensing does not reopen the hardware gate. Cueing tags do not reopen it either.
 
-```mermaid
-flowchart TB
-    subgraph Contract["0.2.x published line"]
-        Adapter[MLXInferenceRuntime]
-        Pin[Qwen3-8B-4bit pin]
-        Smoke[SaturnMLXMeshSmoke]
-    end
+## Development cueing (`0.2.x`)
 
-    subgraph Research["In-tree, not the Node contract"]
-        Graph[Graph / placement / DAG]
-        Mem[Speculative / episodic]
-    end
+Every merge to `main` that has a green package CI run on that exact commit is assigned the next unused `0.2.x` tag.
 
-    Node[Saturn-Node] --> Contract
-    Research -. deferred .-> Node
-```
+Rules:
+
+- Start after the immutable `0.2.0` tag. The first automatic cue is `0.2.1`.
+- Increment only the patch component: `0.2.1`, `0.2.2`, ... Never skip, reuse, or retarget a patch.
+- Tag the exact CI-green `main` SHA. Do not tag a merge commit that failed CI.
+- A commit that already carries a `0.2.x` tag is left unchanged.
+- Cueing tags are Apache-2.0.
+- Cueing tags may include source-breaking adapter changes. Saturn-Node stays on `.upToNextMinor(from: "0.2.0")` and reviews `Package.resolved`.
+- Cueing tags do not require a `Docs/releases/<version>.md` file or founder approval.
+- `0.3.0` and later minors, and `1.0.0`, remain founder-gated formal releases under `RELEASING.md`.
+
+After each new cue, Saturn-Node runs `swift package update saturn-mlx-mesh` and commits `Package.resolved`. Do not pin `main`.
+
+The `0.2.x` contract is the stable Node adapter (`MLXInferenceRuntime` / `MeshModelInferenceRuntime` / `SimulatedMLXInferenceRuntime` / `AcceptanceModelPin`). Graph, placement, speculative, and episodic-memory research may exist in the same repository and is not part of the versioned Node contract.
 
 ## Before the first stable release
 
 Use `0.x.y` semantic versions while the library adapter is stabilizing.
 
-- `0.x.0` may introduce deliberate source/API changes and requires Saturn-Node migration review.
-- `0.x.y` patch releases contain compatible fixes within the current minor line.
-- Saturn-Node should use a bounded next-minor requirement for the approved release line, for example `.upToNextMinor(from: "0.2.0")`.
-- Saturn-Node commits `Package.resolved` and reviews resolved version changes in pull requests.
-- Node CI records and verifies the resolved package version, approved repository origin, and corresponding exact commit SHA.
+- The development cueing line is `0.2.x` as defined above.
+- A later `0.x.0` minor is a formal compatibility reset and requires Saturn-Node migration review plus the gates in `RELEASING.md`.
+- Saturn-Node should use a bounded next-minor requirement, for example `.upToNextMinor(from: "0.2.0")`.
 - Direct revision dependencies are reserved for an explicitly approved temporary recovery or investigation path and must not remain the normal release contract.
-
-The `0.2.x` contract is the stable Node adapter (`MLXInferenceRuntime` / `MeshModelInferenceRuntime` / `SimulatedMLXInferenceRuntime` / `AcceptanceModelPin`). Graph, placement, speculative, and episodic-memory research may exist in the same repository and is not part of the versioned Node contract.
-
-Each new pre-1.0 tag is created only after its release scope is explicitly approved and all gates in `RELEASING.md` pass. This policy never creates or retargets a release by itself.
 
 ## After `1.0.0`
 
 Stable consumers should normally use SwiftPM's next-major semantic-version requirement, for example `from: "1.0.0"`, while continuing to commit `Package.resolved`.
 
-Breaking adapter-contract changes require a new major version. Compatible adapter features use a minor version and compatible fixes use a patch version.
+Breaking adapter-contract changes require a new major version. Compatible adapter features use a minor version and compatible fixes use a patch version. Automatic `0.2.x` cueing does not continue after `1.0.0`.
 
 ## Release provenance
 
@@ -88,8 +73,6 @@ Every saturn-mlx-mesh release must preserve an auditable mapping:
 ```text
 version -> immutable tag -> exact commit SHA
 ```
-
-CI and release records may expose the commit SHA for provenance without requiring Node manifests to depend on that SHA directly.
 
 ## Stable release eligibility
 
