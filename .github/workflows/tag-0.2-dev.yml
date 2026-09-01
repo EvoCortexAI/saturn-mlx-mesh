@@ -1,0 +1,71 @@
+name: Cue 0.2.x development tag
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: saturn-mlx-mesh-0.2-cue
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the green main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Allocate and publish the next 0.2.x tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing="$(git tag --points-at "$TARGET_SHA" | grep -E '^0\.2\.[0-9]+$' || true)"
+          if [[ -n "$existing" ]]; then
+            echo "SHA $TARGET_SHA already carries $existing"
+            exit 0
+          fi
+
+          latest_patch="$(git tag -l '0.2.*' \
+            | sed -n 's/^0\.2\.\([0-9][0-9]*\)$/\1/p' \
+            | sort -n \
+            | tail -1)"
+          latest_patch="${latest_patch:-0}"
+          next_patch=$((latest_patch + 1))
+          tag="0.2.${next_patch}"
+
+          git config user.name "saturn-mlx-mesh-cue"
+          git config user.email "noreply@evocortex.ai"
+          git tag -a "$tag" "$TARGET_SHA" -m "saturn-mlx-mesh $tag"
+          git push origin "refs/tags/$tag"
+
+          notes="Development cue ${tag}
+
+Provenance SHA: ${TARGET_SHA}
+Compatibility line: 0.2.x
+License: Apache License 2.0
+
+Saturn-Node resolves this line with .upToNextMinor(from: \"0.2.0\") and a committed Package.resolved.
+The immutable 0.2.0 tag is not retargeted. Do not create a 0.1.0 tag on current main."
+
+          gh release create "$tag" \
+            --target "$TARGET_SHA" \
+            --title "saturn-mlx-mesh $tag" \
+            --notes "$notes" \
+            --latest
