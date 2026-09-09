@@ -22,6 +22,8 @@ Package.resolved = exact consumer resolution
 
 Do not use a floating branch as a Node dependency. Do not retarget a released version tag.
 
+Tag form is `0.X.x` with no `v` prefix. Mesh's pre-1.0 Node-contract line is `0.2.x`. Do not publish `0.0.x`, retag current `main` as `0.1.0`, or run cueing on `ubuntu-latest`.
+
 The operational release procedure is defined in `RELEASING.md`.
 
 ## Current release line
@@ -30,7 +32,7 @@ Changelog section `0.1.0` (2026-06-12) records the original private skeleton. Th
 
 The first published semantic release is `0.2.0`. It is the first Apache-2.0 tagged release. The active pre-1.0 compatibility and development-cueing line is `0.2.x`.
 
-Hardware acceptance evidence for `mlx-community/Qwen3-8B-4bit` was gathered at provenance SHA `8ce1d6f6d6f5304f526019a5b5bcbf3f2b2f783e`. `0.2.0` is that adapter/runtime surface plus subsequent Apache-2.0 relicensing on `main`. Relicensing does not reopen the hardware gate. Cueing tags do not reopen it either.
+Hardware acceptance evidence for `mlx-community/Qwen3-8B-4bit` was gathered at provenance SHA `8ce1d6f6d6f5304f526019a5b5bcbf3f2b2f783e`. `0.2.0` is that adapter/runtime surface plus subsequent Apache-2.0 relicensing on `main`. Relicensing does not reopen the hardware gate. Cueing tags do not reopen it either. Formal `0.2.0` remains the GitHub Release marked Latest. Cue tags are prereleases.
 
 ## Development cueing (`0.2.x`)
 
@@ -43,6 +45,7 @@ Rules:
 - Tag the exact CI-green `main` SHA. Do not tag a merge commit that failed CI.
 - A commit that already carries a `0.2.x` tag is left unchanged.
 - Cueing tags are Apache-2.0.
+- Publication runs on the Linux self-hosted metadata lane after `workflow_run` of `CI`. It does not use `ubuntu-latest` and does not pass `--latest`.
 - Cueing tags may include source-breaking adapter changes. Saturn-Node stays on `.upToNextMinor(from: "0.2.0")` and reviews `Package.resolved`.
 - Cueing tags do not require a `Docs/releases/<version>.md` file or founder approval.
 - `0.3.0` and later minors, and `1.0.0`, remain founder-gated formal releases under `RELEASING.md`.

@@ -2,8 +2,10 @@ name: Cue 0.2.x development tag
 
 on:
   workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+    workflows:
+      - CI
+    types:
+      - completed
 
 permissions:
   contents: write
@@ -14,31 +16,54 @@ concurrency:
 
 jobs:
   tag:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
-    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: [self-hosted, Linux, ARM64, saturn, apple-container]
     timeout-minutes: 10
+
     steps:
       - name: Check out the green main SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Allocate and publish the next 0.2.x tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+      - name: Verify runner and green main provenance
         shell: bash
+        env:
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          [[ "$RUNNER_OS" == "Linux" ]] || {
+            echo "Expected RUNNER_OS=Linux, got: $RUNNER_OS"
+            exit 1
+          }
+          [[ "$RUNNER_ARCH" == "ARM64" ]] || {
+            echo "Expected RUNNER_ARCH=ARM64, got: $RUNNER_ARCH"
+            exit 1
+          }
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "workflow_run head SHA is not an exact lowercase 40-character commit SHA"
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]] || {
+            echo "Checked-out HEAD does not match green workflow_run SHA"
+            exit 1
+          }
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Allocate and publish the next 0.2.x cue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
 
           existing="$(git tag --points-at "$TARGET_SHA" | grep -E '^0\.2\.[0-9]+$' || true)"
           if [[ -n "$existing" ]]; then
-            echo "SHA $TARGET_SHA already carries $existing"
+            echo "SHA $TARGET_SHA already carries development cue $existing"
             exit 0
           fi
 
@@ -49,23 +74,130 @@ jobs:
           latest_patch="${latest_patch:-0}"
           next_patch=$((latest_patch + 1))
           tag="0.2.${next_patch}"
+          subject="$(git log -1 --format=%s "$TARGET_SHA")"
 
-          git config user.name "saturn-mlx-mesh-cue"
-          git config user.email "noreply@evocortex.ai"
-          git tag -a "$tag" "$TARGET_SHA" -m "saturn-mlx-mesh $tag"
-          git push origin "refs/tags/$tag"
+          RELEASE_TAG="$tag" RELEASE_SUBJECT="$subject" python3 - <<'PY'
+          from __future__ import annotations
 
-          notes="Development cue ${tag}
+          import json
+          import os
+          import pathlib
+          import urllib.error
+          import urllib.parse
+          import urllib.request
 
-Provenance SHA: ${TARGET_SHA}
-Compatibility line: 0.2.x
-License: Apache License 2.0
+          api_root = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+          repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          tag = os.environ["RELEASE_TAG"]
+          target_sha = os.environ["TARGET_SHA"]
+          subject = os.environ["RELEASE_SUBJECT"]
 
-Saturn-Node resolves this line with .upToNextMinor(from: \"0.2.0\") and a committed Package.resolved.
-The immutable 0.2.0 tag is not retargeted. Do not create a 0.1.0 tag on current main."
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "EvoCortexAI-saturn-mlx-mesh-development-cue",
+          }
 
-          gh release create "$tag" \
-            --target "$TARGET_SHA" \
-            --title "saturn-mlx-mesh $tag" \
-            --notes "$notes" \
-            --latest
+          def request_json(method: str, path: str, payload: dict | None = None) -> tuple[int, object]:
+              data = None
+              request_headers = dict(headers)
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
+                  request_headers["Content-Type"] = "application/json"
+              request = urllib.request.Request(
+                  f"{api_root}{path}",
+                  data=data,
+                  headers=request_headers,
+                  method=method,
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      body = response.read().decode("utf-8")
+                      return response.status, json.loads(body) if body else {}
+              except urllib.error.HTTPError as error:
+                  body = error.read().decode("utf-8")
+                  try:
+                      parsed = json.loads(body) if body else {}
+                  except json.JSONDecodeError:
+                      parsed = {"message": body}
+                  return error.code, parsed
+
+          if not tag.startswith("0.2.") or tag.count(".") != 2 or tag.startswith("v"):
+              raise SystemExit(f"Refusing cue: tag {tag} is not 0.2.x form")
+
+          encoded_tag = urllib.parse.quote(tag, safe="")
+          tag_status, _ = request_json("GET", f"/repos/{repository}/git/ref/tags/{encoded_tag}")
+          if tag_status != 404:
+              raise SystemExit(f"Refusing cue: tag {tag} already exists or preflight returned HTTP {tag_status}")
+
+          body = (
+              f"Development cue `{tag}`\n\n"
+              f"Merge: {subject}\n\n"
+              f"Provenance SHA: `{target_sha}`\n"
+              "Compatibility line: `0.2.x`\n"
+              "License: Apache License 2.0\n\n"
+              "Saturn-Node resolves this line with `.upToNextMinor(from: \"0.2.0\")` and a committed `Package.resolved`.\n"
+              "The immutable `0.2.0` tag is not retargeted. Do not create a `0.1.0` tag on current main."
+          )
+          create_status, created = request_json(
+              "POST",
+              f"/repos/{repository}/releases",
+              {
+                  "tag_name": tag,
+                  "target_commitish": target_sha,
+                  "name": f"saturn-mlx-mesh {tag}",
+                  "body": body,
+                  "draft": False,
+                  "prerelease": True,
+                  "make_latest": "false",
+              },
+          )
+          if create_status != 201:
+              message = created.get("message", "unknown error") if isinstance(created, dict) else "unknown error"
+              raise SystemExit(f"Cue creation failed with HTTP {create_status}: {message}")
+
+          verify_status, tag_ref = request_json("GET", f"/repos/{repository}/git/ref/tags/{encoded_tag}")
+          if verify_status != 200 or not isinstance(tag_ref, dict):
+              raise SystemExit(f"Published tag verification failed with HTTP {verify_status}")
+
+          tag_object = tag_ref.get("object", {})
+          resolved_sha = tag_object.get("sha")
+          if tag_object.get("type") == "tag" and resolved_sha:
+              annotated_status, annotated = request_json("GET", f"/repos/{repository}/git/tags/{resolved_sha}")
+              if annotated_status != 200 or not isinstance(annotated, dict):
+                  raise SystemExit(f"Annotated tag verification failed with HTTP {annotated_status}")
+              resolved_sha = annotated.get("object", {}).get("sha")
+
+          if resolved_sha != target_sha:
+              raise SystemExit(f"Published tag {tag} resolves to {resolved_sha}, expected {target_sha}")
+
+          release_url = created.get("html_url", "") if isinstance(created, dict) else ""
+          summary_path = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary_path.open("a", encoding="utf-8") as summary:
+              summary.write(f"## Published development cue {tag}\n\n")
+              summary.write(f"- Provenance: `{target_sha}`\n")
+              summary.write(f"- Release: {release_url}\n")
+              summary.write("- Tag-to-SHA verification: passed\n")
+              summary.write("- GitHub Latest remains the formal 0.2.0 release\n")
+
+          print(f"Published development cue {tag} at {target_sha}: {release_url}")
+          PY
+
+      - name: Clean checked-out workspace
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          repository_root="$(git rev-parse --show-toplevel)"
+          [[ "$workspace" == "$repository_root" ]] || {
+            echo "Refusing cleanup outside the checked-out repository"
+            exit 1
+          }
+
+          git reset --hard HEAD
+          git clean -ffdx
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
