@@ -4,10 +4,11 @@ All notable changes to `saturn-mlx-mesh` will be documented in this file.
 
 Versioning follows semantic-style `0.x.y` while the package remains in early development. See `Docs/VERSIONING.md`, `Docs/RELEASING.md`, and `Docs/MARKDOWN-SCHEMA.md`.
 
-Keep active work in `Unreleased`, then promote to a dated release section when cutting a version. A changelog section is not a published tag. Development cueing publishes an immutable `0.2.x` git tag after every green `main` CI run.
+Keep active work in `Unreleased`, then promote to a dated release section when cutting a version. A changelog section is not a published tag. Development cueing publishes an immutable `0.2.x` git tag after every green `main` CI run. Cue tags use the `0.2.x` form with no `v` prefix and stay prereleases. Formal `0.2.0` remains Latest.
 
 ## [Unreleased]
 
+- Align `0.2.x` cueing with org SAP policy: Linux metadata lane, `workflow_run` after package CI, prerelease tags, `make_latest=false`. Does not retarget `0.2.0`.
 - Add automatic `0.2.x` cueing: every green merge to `main` receives the next unused `0.2.x` tag starting at `0.2.1`.
 - Lock `AcceptanceModelPin.primaryModelID` and the `MLXInferenceRuntime` surface in adapter tests.
 - Compress README to the `0.2.x` Node contract; research graph remains in-tree and out of contract.
